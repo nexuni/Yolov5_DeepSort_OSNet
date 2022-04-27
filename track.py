@@ -10,6 +10,7 @@ import sys
 sys.path.insert(0, './yolov5')
 
 import argparse
+import yaml
 import os
 import platform
 import shutil
@@ -38,7 +39,7 @@ if str(ROOT) not in sys.path:
 ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 
 
-def detect(opt):
+def detect(opt, class_mapping):
     out, source, yolo_model, deep_sort_model, show_vid, save_vid, save_txt, imgsz, evaluate, half, \
         project, exist_ok, update, save_crop = \
         opt.output, opt.source, opt.yolo_model, opt.deep_sort_model, opt.show_vid, opt.save_vid, \
@@ -70,7 +71,10 @@ def detect(opt):
     (save_dir / 'tracks' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
 
     # Load model
-    model = DetectMultiBackend(yolo_model, device=device, dnn=opt.dnn)
+    if half:
+        model = DetectMultiBackend(yolo_model, device=device, dnn=opt.dnn, fp16=True)
+    else:
+        model = DetectMultiBackend(yolo_model, device=device, dnn=opt.dnn)
     stride, names, pt = model.stride, model.names, model.pt
     imgsz = check_img_size(imgsz, s=stride)  # check image size
 
@@ -118,9 +122,16 @@ def detect(opt):
     names = model.module.names if hasattr(model, 'module') else model.names
 
     # Run tracking
+    detected_id = {}
+    save_dataset_idx = 0
+
     model.warmup(imgsz=(1 if pt else nr_sources, 3, *imgsz))  # warmup
     dt, seen = [0.0, 0.0, 0.0, 0.0], 0
     for frame_idx, (path, im, im0s, vid_cap, s) in enumerate(dataset):
+        '''
+        im.shape: (3, imgsz, imgsz) resized
+        im0s.shape: (1242, 1242, 3) original size
+        '''
         t1 = time_sync()
         im = torch.from_numpy(im).to(device)
         im = im.half() if half else im.float()  # uint8 to fp16/32
@@ -165,6 +176,8 @@ def detect(opt):
             s += '%gx%g ' % im.shape[2:]  # print string
             imc = im0.copy() if save_crop else im0  # for save_crop
 
+            imc_dataset = im0.copy() if opt.save_as_dataset else None
+
             annotator = Annotator(im0, line_width=2, pil=not ascii)
 
             if det is not None and len(det):
@@ -191,9 +204,21 @@ def detect(opt):
                     for j, (output) in enumerate(outputs[i]):
 
                         bboxes = output[0:4]
-                        id = output[4]
+                        id = int(output[4])
                         cls = output[5]
                         conf = output[6]
+
+                        # handle anomaly image saving
+                        if id in detected_id.keys():
+                            detected_id[id] +=1
+                        else:
+                            detected_id[id] = 1
+
+                        if detected_id[id] > opt.save_thres:
+                            save_crop = True
+                            detected_id[id] = 0
+                        else:
+                            save_crop = False
 
                         if save_txt:
                             # to MOT format
@@ -206,19 +231,44 @@ def detect(opt):
                                 f.write(('%g ' * 10 + '\n') % (frame_idx + 1, id, bbox_left,  # MOT format
                                                                bbox_top, bbox_w, bbox_h, -1, -1, -1, i))
 
+                        if opt.save_as_dataset:
+                            # NOTE: output coordinates already resized back to the original size
+
+                            # save image
+                            cv2.imwrite(os.path.join(
+                                opt.save_dataset_path,
+                                "images", opt.save_dataset_type,
+                                f"{str(save_dataset_idx).zfill(10)}.png"), imc_dataset)
+
+                            # save label
+                            _class = class_mapping[names[int(cls)]]
+                            x_center = ((output[0] + output[2]) / 2) / im0.shape[1]
+                            y_center = ((output[1] + output[3]) / 2) / im0.shape[0]
+                            w = (output[2] - output[0]) / im0.shape[1]
+                            h = (output[3] - output[1]) / im0.shape[0]
+                            with open(os.path.join(
+                                opt.save_dataset_path,
+                                "labels", opt.save_dataset_type,
+                                f"{str(save_dataset_idx).zfill(10)}.txt"), 'a') as f: 
+                                f.write(f"{_class} {x_center} {y_center} {w} {h}\n")
+                            
+
                         if save_vid or save_crop or show_vid:  # Add bbox to image
                             c = int(cls)  # integer class
-                            label = f'{id:0.0f} {names[c]} {conf:.2f}'
-                            annotator.box_label(bboxes, label, color=colors(c, True))
+                            label = f'{id} {names[c]} {conf:.2f}'
+                            if not opt.hide_box:
+                                annotator.box_label(bboxes, label, color=colors(c, True))
                             if save_crop:
                                 txt_file_name = txt_file_name if (isinstance(path, list) and len(path) > 1) else ''
                                 save_one_box(bboxes, imc, file=save_dir / 'crops' / txt_file_name / names[c] / f'{id}' / f'{p.stem}.jpg', BGR=True)
+                    
+                    save_dataset_idx+=1
 
                 LOGGER.info(f'{s}Done. YOLO:({t3 - t2:.3f}s), DeepSort:({t5 - t4:.3f}s)')
-
             else:
                 deepsort_list[i].increment_ages()
                 LOGGER.info('No detections')
+
 
             # Stream results
             im0 = annotator.result()
@@ -237,7 +287,7 @@ def detect(opt):
                         w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                         h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                     else:  # stream
-                        fps, w, h = 30, im0.shape[1], im0.shape[0]
+                        fps, w, h = 15, im0.shape[1], im0.shape[0]
                     save_path = str(Path(save_path).with_suffix('.mp4'))  # force *.mp4 suffix on results videos
                     vid_writer[i] = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
                 vid_writer[i].write(im0)
@@ -254,9 +304,13 @@ def detect(opt):
 
 
 if __name__ == '__main__':
+    '''
+    for collecting dataset: 
+     - python3.8 track.py --source path/to/video --yolo_model yolov5x.pt --classes 0 1 2 3 5 7 24 26 28 --half --save-vid --save-as-dataset
+    '''
     parser = argparse.ArgumentParser()
     parser.add_argument('--yolo_model', nargs='+', type=str, default='yolov5m.pt', help='model.pt path(s)')
-    parser.add_argument('--deep_sort_model', type=str, default='osnet_x0_25')
+    parser.add_argument('--deep_sort_model', type=str, default='resnet50')
     parser.add_argument('--source', type=str, default='0', help='source')  # file/folder, 0 for webcam
     parser.add_argument('--output', type=str, default='inference/output', help='output folder')  # output folder
     parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, default=[640], help='inference size h,w')
@@ -282,8 +336,24 @@ if __name__ == '__main__':
     parser.add_argument('--project', default=ROOT / 'runs/track', help='save results to project/name')
     parser.add_argument('--name', default='exp', help='save results to project/name')
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
+    # Custom
+    parser.add_argument('--hide-box', action='store_true', help='hide the cropping box')
+    parser.add_argument('--save-as-dataset', action='store_true', help='save the prediction results to coco dataset format')
+    parser.add_argument("--save-dataset-path", type=str, default="./yolov5/nexuni/dataset")
+    parser.add_argument("--save-dataset-type", type=str, default="train")
+    parser.add_argument('--save-thres', type=int, default=100, help='save the crop image if detected id exceed the threshold')
     opt = parser.parse_args()
+
+    if opt.save_as_dataset:
+        if not os.path.exists(os.path.join(opt.save_dataset_path, "images", opt.save_dataset_type)):
+            os.makedirs(os.path.join(opt.save_dataset_path, "images", opt.save_dataset_type))
+        if not os.path.exists(os.path.join(opt.save_dataset_path, "labels", opt.save_dataset_type)):
+            os.makedirs(os.path.join(opt.save_dataset_path, "labels", opt.save_dataset_type))
+        with open("./yolov5/nexuni/nexuni.yaml", 'r') as f:
+            data_format = yaml.load(f, Loader=yaml.FullLoader)
+            class_mapping = {name:i for i, name in enumerate(data_format["names"])}
+
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
 
     with torch.no_grad():
-        detect(opt)
+        detect(opt, class_mapping)
