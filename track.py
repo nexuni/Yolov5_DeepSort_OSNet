@@ -304,10 +304,6 @@ def detect(opt, class_mapping):
 
 
 if __name__ == '__main__':
-    '''
-    for collecting dataset: 
-     - python3.8 track.py --source path/to/video --yolo_model yolov5x.pt --classes 0 1 2 3 5 7 24 26 28 --half --save-vid --save-as-dataset
-    '''
     parser = argparse.ArgumentParser()
     parser.add_argument('--yolo_model', nargs='+', type=str, default='yolov5m.pt', help='model.pt path(s)')
     parser.add_argument('--deep_sort_model', type=str, default='resnet50')
