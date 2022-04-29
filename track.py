@@ -340,6 +340,8 @@ if __name__ == '__main__':
     parser.add_argument('--save-thres', type=int, default=100, help='save the crop image if detected id exceed the threshold')
     opt = parser.parse_args()
 
+
+    class_mapping = None
     if opt.save_as_dataset:
         if not os.path.exists(os.path.join(opt.save_dataset_path, "images", opt.save_dataset_type)):
             os.makedirs(os.path.join(opt.save_dataset_path, "images", opt.save_dataset_type))
