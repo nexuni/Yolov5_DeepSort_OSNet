@@ -32,6 +32,9 @@ from yolov5.utils.plots import Annotator, colors, save_one_box
 from deep_sort.utils.parser import get_config
 from deep_sort.deep_sort import DeepSort
 
+from PostgreSQL.schema import *
+from PostgreSQL.anomaly import *
+
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # yolov5 deepsort root directory
 if str(ROOT) not in sys.path:
@@ -259,8 +262,18 @@ def detect(opt, class_mapping):
                             if not opt.hide_box:
                                 annotator.box_label(bboxes, label, color=colors(c, True))
                             if save_crop:
+                                LOGGER.info(f"Save: {names[c]}")
                                 txt_file_name = txt_file_name if (isinstance(path, list) and len(path) > 1) else ''
-                                save_one_box(bboxes, imc, file=save_dir / 'crops' / txt_file_name / names[c] / f'{id}' / f'{p.stem}.jpg', BGR=True)
+                                full_path = os.path.join(save_dir, 'crops', txt_file_name, names[c], f'{id}', f'{p.stem}.jpg')
+                                add_anomaly({
+                                    ANOMALY_TYPE: names[c],
+                                    ROBOT_ID: opt.robot_id,
+                                    SITE_ID: "site A",
+                                    ANOMALY_LAT: "24.987292967314355",
+                                    ANOMALY_LNG: "121.5522044067383",
+                                    ANOMALY_IMAGE_PATH: full_path
+                                })
+                                save_one_box(bboxes, imc, file=Path(full_path), BGR=True)
                     
                     save_dataset_idx+=1
 
@@ -337,6 +350,7 @@ if __name__ == '__main__':
     parser.add_argument('--save-as-dataset', action='store_true', help='save the prediction results to coco dataset format')
     parser.add_argument("--save-dataset-path", type=str, default="./yolov5/nexuni/dataset")
     parser.add_argument("--save-dataset-type", type=str, default="train")
+    parser.add_argument("--robot-id", type=str, default="robot id")
     parser.add_argument('--save-thres', type=int, default=100, help='save the crop image if detected id exceed the threshold')
     opt = parser.parse_args()
 
