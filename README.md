@@ -5,7 +5,7 @@ python3.8 track.py --source path/to/video --yolo_model yolov5x.pt --classes 0 1 
 ```
 * Detection:
 ```bash
-python3.8 track.py --source path/to/video --yolo_model yolov5x.pt --classes 0 1 2 3 5 7 24 26 28 --half --save-vid --hide-box --project /yolo_image --robot-id NSR-0
+python3.8 track.py --source path/to/video --yolo_model yolov5x.pt --classes 0 1 2 3 5 7 24 26 28 --half --save-vid --hide-box --project /image --robot-id NSR-0
 ```
 * Train:
 ```bash

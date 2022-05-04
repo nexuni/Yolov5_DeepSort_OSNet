@@ -271,7 +271,7 @@ def detect(opt, class_mapping):
                                     SITE_ID: "site A",
                                     ANOMALY_LAT: "24.987292967314355",
                                     ANOMALY_LNG: "121.5522044067383",
-                                    ANOMALY_IMAGE_PATH: full_path
+                                    ANOMALY_IMAGE_PATH: 'asset' + full_path
                                 })
                                 save_one_box(bboxes, imc, file=Path(full_path), BGR=True)
                     
