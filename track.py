@@ -264,7 +264,13 @@ def detect(opt, class_mapping):
                             if save_crop:
                                 LOGGER.info(f"Save: {names[c]}")
                                 txt_file_name = txt_file_name if (isinstance(path, list) and len(path) > 1) else ''
-                                full_path = os.path.join(save_dir, 'crops', txt_file_name, names[c], f'{id}', f'{p.stem}.jpg')
+                                _, full_path = save_one_box(
+                                    bboxes,
+                                    imc,
+                                    file=Path(os.path.join(
+                                        save_dir,'crops', txt_file_name, names[c], f'id_{id}', f'{p.stem}.jpg')),
+                                    BGR=True
+                                    )
                                 add_anomaly({
                                     ANOMALY_TYPE: names[c],
                                     ROBOT_ID: opt.robot_id,
@@ -273,7 +279,6 @@ def detect(opt, class_mapping):
                                     ANOMALY_LNG: "121.5522044067383",
                                     ANOMALY_IMAGE_PATH: 'asset' + full_path
                                 })
-                                save_one_box(bboxes, imc, file=Path(full_path), BGR=True)
                     
                     save_dataset_idx+=1
 
@@ -367,5 +372,12 @@ if __name__ == '__main__':
 
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
 
-    with torch.no_grad():
-        detect(opt, class_mapping)
+    while True:
+        try:
+            with torch.no_grad():
+                detect(opt, class_mapping)
+            break
+        except KeyboardInterrupt:
+            break
+        except:
+            print("Error")
