@@ -9,6 +9,7 @@ os.environ["NUMEXPR_NUM_THREADS"] = "1"
 import sys
 sys.path.insert(0, './yolov5')
 
+import glob
 import argparse
 import yaml
 import os
@@ -35,6 +36,7 @@ from deep_sort.deep_sort import DeepSort
 
 from PostgreSQL.schema import *
 from PostgreSQL.anomaly import *
+from datetime import datetime
 import socket
 
 FILE = Path(__file__).resolve()
@@ -58,24 +60,27 @@ def Collect_data():
     server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(server_addr)
-
+    print("Data thread running")
     while True:
         try:
             indata, addr = server.recvfrom(1024)
-            indata = indata.decode()
+            indata = json.loads(indata.decode())
             # print(f"receive data: {indata}")
             data_queue.put(indata)
         except Exception as e:
             print(e)
         
 def test_detect():
-
+    fps, size = 15, (1280, 720)
+    writer = cv2.VideoWriter("result.mp4", cv2.VideoWriter_fourcc(*'mp4v'), fps, size)
+    q = []
     while True:
         try:
-            data_path = data_queue.get()
-            print(f"processing data: {data_path}")
+            data = data_queue.get()
+            print(f"processing data: {data}")
+            writer.write(cv2.imread(data["filepath"]))
         except:
-            pass    
+            pass  
 
 def detect(opt, class_mapping):
     out, source, yolo_model, deep_sort_model, show_vid, save_vid, save_txt, imgsz, evaluate, half, \
@@ -104,15 +109,12 @@ def detect(opt, class_mapping):
         exp_name = yolo_model[0].split(".")[0]
     else:  # multiple models after --yolo_model
         exp_name = "ensemble"
-    exp_name = exp_name + "_" + deep_sort_model.split('/')[-1].split('.')[0]
-    save_dir = increment_path(Path(project) / exp_name, exist_ok=exist_ok)  # increment run if project name exists
-    (save_dir / 'tracks' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
+    exp_name = f"{exp_name}_{deep_sort_model.split('/')[-1].split('.')[0]}"
+    save_dir = increment_path(Path(project) / exp_name, exist_ok=exist_ok)
+    save_dir.mkdir(parents=True, exist_ok=True)
 
     # Load model
-    if half:
-        model = DetectMultiBackend(yolo_model, device=device, dnn=opt.dnn, fp16=True)
-    else:
-        model = DetectMultiBackend(yolo_model, device=device, dnn=opt.dnn)
+    model = DetectMultiBackend(yolo_model, device=device, dnn=opt.dnn, fp16=True) if half else DetectMultiBackend(yolo_model, device=device, dnn=opt.dnn)
     stride, names, pt = model.stride, model.names, model.pt
     imgsz = check_img_size(imgsz, s=stride)  # check image size
 
@@ -121,71 +123,61 @@ def detect(opt, class_mapping):
     if pt:
         model.model.half() if half else model.model.float()
 
-    # Set Dataloader
-    vid_path, vid_writer = None, None
-    # Check if environment supports image displays
-    if show_vid:
-        show_vid = check_imshow()
-
-    # # Dataloader
-    # if webcam:
-    #     show_vid = check_imshow()
-    #     cudnn.benchmark = True  # set True to speed up constant image size inference
-    #     dataset = LoadStreams(source, img_size=imgsz, stride=stride, auto=pt)
-    #     nr_sources = len(dataset)
-    # else:
-    #     dataset = LoadImages(source, img_size=imgsz, stride=stride, auto=pt)
-    #     nr_sources = 1
-    nr_sources = 1
-    vid_path, vid_writer, txt_path = [None] * nr_sources, [None] * nr_sources, [None] * nr_sources
-
-    # initialize deepsort
+    # Initialize deepsort
     cfg = get_config()
     cfg.merge_from_file(opt.config_deepsort)
 
     # Create as many trackers as there are video sources
-    deepsort_list = []
-    for i in range(nr_sources):
-        deepsort_list.append(
-            DeepSort(
-                deep_sort_model,
-                device,
-                max_dist=cfg.DEEPSORT.MAX_DIST,
-                max_iou_distance=cfg.DEEPSORT.MAX_IOU_DISTANCE,
-                max_age=cfg.DEEPSORT.MAX_AGE, n_init=cfg.DEEPSORT.N_INIT, nn_budget=cfg.DEEPSORT.NN_BUDGET,
-            )
-        )
-    outputs = [None] * nr_sources
+    deepsort =  DeepSort(
+        deep_sort_model,
+        device,
+        max_dist=cfg.DEEPSORT.MAX_DIST,
+        max_iou_distance=cfg.DEEPSORT.MAX_IOU_DISTANCE,
+        max_age=cfg.DEEPSORT.MAX_AGE, n_init=cfg.DEEPSORT.N_INIT, nn_budget=cfg.DEEPSORT.NN_BUDGET,
+    )
 
     # Get names and colors
     names = model.module.names if hasattr(model, 'module') else model.names
 
     # Run tracking
-    detected_id = {}
+    object_cache = {}
+    vehicles = set(['bicycle', 'car', 'motorcycle', 'bus', 'truck'])
+    moving_vehicles_idx = 0
+    cross_road_frame_cnt = 0
     save_dataset_idx = 0
+    video_writer = None
 
-    model.warmup(imgsz=(1 if pt else nr_sources, 3, *imgsz))  # warmup
-    dt, seen = [0.0, 0.0, 0.0, 0.0], 0
-    frame_idx = 0
-    vid_cap = None
-    # for frame_idx, (path, im, im0s, vid_cap, s) in enumerate(dataset):
+    model.warmup(imgsz=(1, 3, *imgsz))
+    processed_times, processed_images = [0.0, 0.0, 0.0, 0.0], 0
     while True:
         try:
-            path = data_queue.get()
-            # LOGGER.info(f"processing data: {path}")
-            im0s = cv2.imread(path)
-            im = letterbox(im0s, imgsz, stride=stride, auto=pt)[0]
+            '''
+            data: {"type": ..., "filepath": ..., "timestamp": ...}
+            im.shape: (3, imgsz, imgsz) resized
+            raw_image.shape: (h, w, 3) original size
+            '''
+            data = data_queue.get()
+            data_path, data_type, data_timestamp = data["filepath"], data["type"], data["timestamp"]
+
+            if (datetime.now().timestamp() - data_timestamp) > opt.image_timestamp_thres:
+                continue
+
+            if data_type == "cross":
+                cross_road_frame_cnt +=1
+            elif data_type == "anomaly":
+                cross_road_frame_cnt = 0
+            else:
+                break
+            raw_image = cv2.imread(data_path)
+            im = letterbox(raw_image, imgsz, stride=stride, auto=pt)[0]
             im = im.transpose((2, 0, 1))[::-1]
             im = np.ascontiguousarray(im)
-            s = f"{(path)}: "
+            logger_string = f"{(data_path)}: "
         except Exception as e:
-            print(e)
-            continue    
-        '''
-        im.shape: (3, imgsz, imgsz) resized
-        im0s.shape: (1242, 1242, 3) original size
-        '''
-        # print(im.shape)
+            print(f"Error: {e}")
+            continue
+        
+        # Preprocessing image
         t1 = time_sync()
         im = torch.from_numpy(im).to(device)
         im = im.half() if half else im.float()  # uint8 to fp16/32
@@ -193,180 +185,161 @@ def detect(opt, class_mapping):
         if len(im.shape) == 3:
             im = im[None]  # expand for batch dim
         t2 = time_sync()
-        dt[0] += t2 - t1
+        processed_times[0] += t2 - t1
 
         # Inference
-        # visualize = increment_path(save_dir / Path(path[0]).stem, mkdir=True) if opt.visualize else False
         pred = model(im, augment=opt.augment, visualize=False)
         t3 = time_sync()
-        dt[1] += t3 - t2
+        processed_times[1] += t3 - t2
 
         # Apply NMS
-        pred = non_max_suppression(pred, opt.conf_thres, opt.iou_thres, opt.classes, opt.agnostic_nms, max_det=opt.max_det)
-        dt[2] += time_sync() - t3
+        [pred] = non_max_suppression(pred, opt.conf_thres, opt.iou_thres, opt.classes, opt.agnostic_nms, max_det=opt.max_det)
+        processed_times[2] += time_sync() - t3
 
-        # Process detections
-        for i, det in enumerate(pred):  # detections per image
-            seen += 1
+        # Processing detections
+        processed_images += 1
+        p = Path(data_path)
+        save_path = str(save_dir / "result")  # im.jpg, vid.mp4, ...
 
-            # if webcam:  # nr_sources >= 1
-            #     p, im0, _ = path[i], im0s[i].copy(), dataset.count
-            #     p = Path(p)  # to Path
-            #     s += f'{i}: '
-            #     txt_file_name = p.name
-            #     save_path = str(save_dir / p.name)  # im.jpg, vid.mp4, ...
-            # else:
-            #     p, im0, _ = path, im0s.copy(), getattr(dataset, 'frame', 0)
-            #     p = Path(p)  # to Path
-            #     # video file
-            #     if source.endswith(VID_FORMATS):
-            #         txt_file_name = p.stem
-            #         save_path = str(save_dir / p.name)  # im.jpg, vid.mp4, ...
-            #     # folder with imgs
-            #     else:
-            #         txt_file_name = p.parent.name  # get folder name containing current img
-            #         save_path = str(save_dir / p.parent.name)  # im.jpg, vid.mp4, ...
+        logger_string += '%gx%g ' % im.shape[2:]
 
-            # txt_path = str(save_dir / 'tracks' / txt_file_name)  # im.txt
-            p, im0 = Path(path), im0s.copy()
-            save_path = str(save_dir / p.parent.name)  # im.jpg, vid.mp4, ...
+        annotator = Annotator(raw_image, line_width=2, pil=not ascii)
 
-            s += '%gx%g ' % im.shape[2:]  # print string
-            imc = im0.copy() if save_crop else im0  # for save_crop
+        if pred is not None and len(pred):
+            # Rescale boxes from img_size to raw_image size
+            pred[:, :4] = scale_coords(im.shape[2:], pred[:, :4], raw_image.shape).round()
 
-            imc_dataset = im0.copy() if opt.save_as_dataset else None
+            # Print results
+            for c in pred[:, -1].unique():
+                n = (pred[:, -1] == c).sum()  # detections per class
+                logger_string += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
 
-            annotator = Annotator(im0, line_width=2, pil=not ascii)
+            xywhs = xyxy2xywh(pred[:, 0:4])
+            confs = pred[:, 4]
+            clss = pred[:, 5]
 
-            if det is not None and len(det):
-                # Rescale boxes from img_size to im0 size
-                det[:, :4] = scale_coords(im.shape[2:], det[:, :4], im0.shape).round()
+            # Pass detections to deepsort
+            t4 = time_sync()
+            outputs = deepsort.update(xywhs.cpu(), confs.cpu(), clss.cpu(), raw_image)
+            t5 = time_sync()
+            processed_times[3] += t5 - t4
 
-                # Print results
-                for c in det[:, -1].unique():
-                    n = (det[:, -1] == c).sum()  # detections per class
-                    s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
+            # Draw boxes for visualization
+            for j, (output) in enumerate(outputs):
+                save_crop = False
+                # output coordinates already resized back to the original size
+                bboxes, object_id, object_class, object_confidence = output[0:4], int(output[4]), int(output[5]), output[6]
+                obj_x_center_normalized = ((bboxes[0] + bboxes[2]) / 2) / raw_image.shape[1]
+                obj_y_center_normalized = ((bboxes[1] + bboxes[3]) / 2) / raw_image.shape[0]
+                obj_w_normalized = (bboxes[2] - bboxes[0]) / raw_image.shape[1]
+                obj_h_normalized = (bboxes[3] - bboxes[1]) / raw_image.shape[0]
 
-                xywhs = xyxy2xywh(det[:, 0:4])
-                confs = det[:, 4]
-                clss = det[:, 5]
+                # Increase object count; if not recently updated, reset the count
+                current_timestamp = datetime.now().timestamp()
+                if (object_id in object_cache.keys()) and \
+                        (current_timestamp - object_cache[object_id]["last_update_time"]) < opt.cache_thres:
+                    object_cache[object_id]["count"] +=1
+                else:
+                    object_cache[object_id] = {}
+                    object_cache[object_id]["count"] = 1
+                    object_cache[object_id]["first_coord"] = np.array([obj_x_center_normalized, obj_y_center_normalized])
+                    object_cache[object_id]["class_name"] = names[object_class]
 
-                # pass detections to deepsort
-                t4 = time_sync()
-                outputs[i] = deepsort_list[i].update(xywhs.cpu(), confs.cpu(), clss.cpu(), im0)
-                t5 = time_sync()
-                dt[3] += t5 - t4
+                object_cache[object_id]["last_update_time"] = current_timestamp
+                object_cache[object_id]["last_coord"] = np.array([obj_x_center_normalized, obj_y_center_normalized])
 
-                # draw boxes for visualization
-                if len(outputs[i]) > 0:
-                    for j, (output) in enumerate(outputs[i]):
+                # For anomaly
+                if not (object_cache[object_id]["class_name"] in vehicles):
+                    if object_cache[object_id]["count"] > opt.save_thres:
+                        save_crop = True
+                        del object_cache[object_id]
 
-                        bboxes = output[0:4]
-                        id = int(output[4])
-                        cls = output[5]
-                        conf = output[6]
+                # For dataset collecting
+                if opt.save_as_dataset:
+                    # Save image
+                    cv2.imwrite(os.path.join(
+                        opt.save_dataset_path,
+                        "images", opt.save_dataset_type,
+                        f"{str(save_dataset_idx).zfill(10)}.png"), raw_image.copy())
 
-                        # handle anomaly image saving
-                        if id in detected_id.keys():
-                            detected_id[id] +=1
-                        else:
-                            detected_id[id] = 1
-
-                        if detected_id[id] > opt.save_thres:
-                            save_crop = True
-                            detected_id[id] = 0
-                        else:
-                            save_crop = False
-
-                        if save_txt:
-                            # to MOT format
-                            bbox_left = output[0]
-                            bbox_top = output[1]
-                            bbox_w = output[2] - output[0]
-                            bbox_h = output[3] - output[1]
-                            # Write MOT compliant results to file
-                            with open(txt_path + '.txt', 'a') as f:
-                                f.write(('%g ' * 10 + '\n') % (frame_idx + 1, id, bbox_left,  # MOT format
-                                                               bbox_top, bbox_w, bbox_h, -1, -1, -1, i))
-
-                        if opt.save_as_dataset:
-                            # NOTE: output coordinates already resized back to the original size
-
-                            # save image
-                            cv2.imwrite(os.path.join(
-                                opt.save_dataset_path,
-                                "images", opt.save_dataset_type,
-                                f"{str(save_dataset_idx).zfill(10)}.png"), imc_dataset)
-
-                            # save label
-                            _class = class_mapping[names[int(cls)]]
-                            x_center = ((output[0] + output[2]) / 2) / im0.shape[1]
-                            y_center = ((output[1] + output[3]) / 2) / im0.shape[0]
-                            w = (output[2] - output[0]) / im0.shape[1]
-                            h = (output[3] - output[1]) / im0.shape[0]
-                            with open(os.path.join(
-                                opt.save_dataset_path,
-                                "labels", opt.save_dataset_type,
-                                f"{str(save_dataset_idx).zfill(10)}.txt"), 'a') as f: 
-                                f.write(f"{_class} {x_center} {y_center} {w} {h}\n")
-                            
-
-                        if save_vid or save_crop or show_vid:  # Add bbox to image
-                            c = int(cls)  # integer class
-                            label = f'{id} {names[c]} {conf:.2f}'
-                            if not opt.hide_box:
-                                annotator.box_label(bboxes, label, color=colors(c, True))
-                            if save_crop:
-                                LOGGER.info(f"Save: {names[c]}")
-                                txt_file_name = txt_file_name if (isinstance(path, list) and len(path) > 1) else ''
-                                _, full_path = save_one_box(
-                                    bboxes,
-                                    imc,
-                                    file=Path(os.path.join(
-                                        save_dir,'crops', txt_file_name, names[c], f'id_{id}', f'{p.stem}.jpg')),
-                                    BGR=True
-                                    )
-                                add_anomaly({
-                                    ANOMALY_TYPE: names[c],
-                                    ROBOT_ID: opt.robot_id,
-                                    SITE_ID: "site A",
-                                    ANOMALY_LAT: "24.987292967314355",
-                                    ANOMALY_LNG: "121.5522044067383",
-                                    ANOMALY_IMAGE_PATH: 'asset' + full_path
-                                })
+                    # Save label
+                    _class = class_mapping[names[object_class]]
+                    with open(os.path.join(
+                        opt.save_dataset_path,
+                        "labels", opt.save_dataset_type,
+                        f"{str(save_dataset_idx).zfill(10)}.txt"), 'a') as f: 
+                        f.write(f"{_class} {obj_x_center_normalized} {obj_y_center_normalized} {obj_w_normalized} {obj_h_normalized}\n")
                     
                     save_dataset_idx+=1
 
-                LOGGER.info(f'{s}Done. YOLO:({t3 - t2:.3f}s), DeepSort:({t5 - t4:.3f}s)')
-            else:
-                deepsort_list[i].increment_ages()
-                LOGGER.info('No detections')
+                # Add bbox to image
+                if save_vid or save_crop:
+                    label = f'{object_id} {names[object_class]} {object_confidence:.2f}'
+                    if not opt.hide_box:
+                        annotator.box_label(bboxes, label, color=colors(object_class, True))
+                    if save_crop:
+                        LOGGER.info(f"Save: {names[object_class]}")
+                        _, full_path = save_one_box(
+                            bboxes,
+                            raw_image.copy(),
+                            file=Path(os.path.join(
+                                save_dir,'crops', names[object_class], f'id_{object_id}', f'{p.stem}.jpg')),
+                            BGR=True
+                            )
+                        add_anomaly({
+                            ANOMALY_TYPE: names[object_class],
+                            ROBOT_ID: opt.robot_id,
+                            SITE_ID: "site A",
+                            ANOMALY_LAT: "24.987292967314355",
+                            ANOMALY_LNG: "121.5522044067383",
+                            ANOMALY_IMAGE_PATH: 'asset' + full_path
+                        })
+            
+            # Determine cross road
+            if cross_road_frame_cnt > opt.cross_road_frame_thres:
+                moving_vehicles = 0
+                # Iterate through all vehicles in object cache
+                for obj_id, obj_info in object_cache.items():
+                    # Skip if not vehicles
+                    if not (object_cache[obj_id]["class_name"] in vehicles): continue
+                    # Calculate displacement norm
+                    displacement = object_cache[obj_id]["last_coord"] - object_cache[obj_id]["first_coord"]
+                    displacement_norm = np.sqrt(np.sum(displacement**2))
+                    # Consider it moving if > threshold
+                    if displacement_norm > opt.displacement_thres:
+                        LOGGER.info(f"Moving class: {object_cache[obj_id]['class_name']} | Moving id: {obj_id} | Norm: {displacement_norm}")
+                        moving_vehicles+=1
+                    # Reset the first coordinate
+                    object_cache[obj_id]["first_coord"] = object_cache[obj_id]["last_coord"]
 
+                # Stop if moving vehicles > threshold
+                if moving_vehicles > opt.moving_vehicles_thres:
+                    LOGGER.info("STOP")
+                    cv2.imwrite(f"temp_image/{moving_vehicles_idx}.png", raw_image)
+                    moving_vehicles_idx+=1
+                else:
+                    LOGGER.info("PASS")
+                cross_road_frame_cnt = 0
+            
+            # Summary logger
+            LOGGER.info(f'{logger_string}Done. YOLO:({t3 - t2:.3f}s), DeepSort:({t5 - t4:.3f}s)')
+        else:
+            deepsort.increment_ages()
+            LOGGER.info('No detections')
 
-            # Stream results
-            im0 = annotator.result()
-            if show_vid:
-                cv2.imshow(str(p), im0)
-                cv2.waitKey(1)  # 1 millisecond
-
-            # Save results (image with detections)
-            if save_vid:
-                if vid_path[i] != save_path:  # new video
-                    vid_path[i] = save_path
-                    if isinstance(vid_writer[i], cv2.VideoWriter):
-                        vid_writer[i].release()  # release previous video writer
-                    if vid_cap:  # video
-                        fps = vid_cap.get(cv2.CAP_PROP_FPS)
-                        w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                        h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                    else:  # stream
-                        fps, w, h = 15, im0.shape[1], im0.shape[0]
-                    save_path = str(Path(save_path).with_suffix('.mp4'))  # force *.mp4 suffix on results videos
-                    vid_writer[i] = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-                vid_writer[i].write(im0)
+        # Stream results
+        raw_image = annotator.result()
+        if save_vid:
+            if not video_writer:
+                fps, size = opt.fps, (raw_image.shape[1], raw_image.shape[0])
+                video_writer = cv2.VideoWriter("result.mp4", cv2.VideoWriter_fourcc(*'mp4v'), fps, size)
+            video_writer.write(raw_image)
+        
+        # Remove image after inferenced
+        os.remove(data_path)
 
     # Print results
-    t = tuple(x / seen * 1E3 for x in dt)  # speeds per image
+    t = tuple(x / processed_images * 1E3 for x in processed_times)  # speeds per image
     LOGGER.info(f'Speed: %.1fms pre-process, %.1fms inference, %.1fms NMS, %.1fms deep sort update \
         per image at shape {(1, 3, *imgsz)}' % t)
     if save_txt or save_vid:
@@ -406,16 +379,22 @@ if __name__ == '__main__':
     parser.add_argument('--name', default='exp', help='save results to project/name')
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
     # Custom
+    parser.add_argument('--fps', type=float, default=15., help='fps for saving vedio')
     parser.add_argument('--hide-box', action='store_true', help='hide the cropping box')
     parser.add_argument('--save-as-dataset', action='store_true', help='save the prediction results to coco dataset format')
     parser.add_argument("--save-dataset-path", type=str, default="./yolov5/nexuni/dataset")
     parser.add_argument("--save-dataset-type", type=str, default="train")
     parser.add_argument("--robot-id", type=str, default="robot id")
-    parser.add_argument('--save-thres', type=int, default=100, help='save the crop image if detected id exceed the threshold')
+    parser.add_argument('--save-thres', type=int, default=100, help='Save the crop image if detected id exceed the threshold')
+    parser.add_argument('--cache-thres', type=int, default=300, help='Remove object in cache if not recently updated')
+    parser.add_argument('--image-timestamp-thres', type=int, default=30, help='Skip the image if out of date')
+    parser.add_argument('--cross-road-frame-thres', type=int, default=100, help='Determine cross or deny after detecting cross-road-frame-thres images')
+    parser.add_argument('--displacement-thres', type=float, default=0.33, help='Consider vehicles moving if displacement > displacement-thres')
+    parser.add_argument('--moving-vehicles-thres', type=int, default=0, help='Determine cross or deny if moving vehicles > moving-vehicles-thres')
     opt = parser.parse_args()
 
 
-    class_mapping = None
+    class_mapping = None # This is for making training dataset
     if opt.save_as_dataset:
         if not os.path.exists(os.path.join(opt.save_dataset_path, "images", opt.save_dataset_type)):
             os.makedirs(os.path.join(opt.save_dataset_path, "images", opt.save_dataset_type))
@@ -430,5 +409,6 @@ if __name__ == '__main__':
     t = threading.Thread(target = Collect_data)
     t.daemon = True
     t.start()
+    # test_detect()
     with torch.no_grad():
         detect(opt, class_mapping)
