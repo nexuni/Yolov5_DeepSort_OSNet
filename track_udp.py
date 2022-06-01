@@ -237,7 +237,7 @@ def detect(opt, class_mapping):
                 # Increase object count; if not recently updated, reset the count
                 current_timestamp = datetime.now().timestamp()
                 if (object_id in object_cache.keys()) and \
-                        (current_timestamp - object_cache[object_id]["last_update_time"]) < opt.cache_thres:
+                        (current_timestamp - object_cache[object_id]["last_update_time"]) < opt.cache_time_thres:
                     object_cache[object_id]["count"] +=1
                 else:
                     object_cache[object_id] = {}
@@ -386,7 +386,7 @@ if __name__ == '__main__':
     parser.add_argument("--save-dataset-type", type=str, default="train")
     parser.add_argument("--robot-id", type=str, default="robot id")
     parser.add_argument('--save-thres', type=int, default=100, help='Save the crop image if detected id exceed the threshold')
-    parser.add_argument('--cache-thres', type=int, default=300, help='Remove object in cache if not recently updated')
+    parser.add_argument('--cache-time-thres', type=int, default=300, help='Remove object in cache if not recently updated')
     parser.add_argument('--image-timestamp-thres', type=int, default=30, help='Skip the image if out of date')
     parser.add_argument('--cross-road-frame-thres', type=int, default=100, help='Determine cross or deny after detecting cross-road-frame-thres images')
     parser.add_argument('--displacement-thres', type=float, default=0.33, help='Consider vehicles moving if displacement > displacement-thres')
