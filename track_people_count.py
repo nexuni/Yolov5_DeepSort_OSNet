@@ -88,6 +88,7 @@ def across_boundary(segment, boundary, reverse):
     outter <=> normal vector          <=> dot product > 0
     inner  <=> negative normal vector <=> dot product < 0
     '''
+    # print(p1t1_dot_normal, p1t2_dot_normal, normal)
     if p1t1_dot_normal > 0 and p1t2_dot_normal < 0: # outter to inner
         if reverse: return -1
         else: return 1
@@ -100,7 +101,7 @@ def across_boundary(segment, boundary, reverse):
 
 def normal_vec(segment):
     p1, p2 = segment
-    return np.array((- (p2[1] - p1[1]), p2[0] - p1[0]))
+    return np.array((p2[1] - p1[1], - (p2[0] - p1[0])))
 
 def detect(opt, class_mapping):
     out, source, yolo_model, deep_sort_model, show_vid, save_vid, save_txt, imgsz, evaluate, half, \
@@ -161,25 +162,20 @@ def detect(opt, class_mapping):
     else:
         dataset = LoadImages(source, img_size=imgsz, stride=stride, auto=pt)
         nr_sources = 1
-    vid_path, vid_writer, txt_path = [None] * nr_sources, [None] * nr_sources, [None] * nr_sources
+
 
     # initialize deepsort
     cfg = get_config()
     cfg.merge_from_file(opt.config_deepsort)
 
     # Create as many trackers as there are video sources
-    deepsort_list = []
-    for i in range(nr_sources):
-        deepsort_list.append(
-            DeepSort(
-                deep_sort_model,
-                device,
-                max_dist=cfg.DEEPSORT.MAX_DIST,
-                max_iou_distance=cfg.DEEPSORT.MAX_IOU_DISTANCE,
-                max_age=cfg.DEEPSORT.MAX_AGE, n_init=cfg.DEEPSORT.N_INIT, nn_budget=cfg.DEEPSORT.NN_BUDGET,
-            )
-        )
-    outputs = [None] * nr_sources
+    deepsort =  DeepSort(
+        deep_sort_model,
+        device,
+        max_dist=cfg.DEEPSORT.MAX_DIST,
+        max_iou_distance=cfg.DEEPSORT.MAX_IOU_DISTANCE,
+        max_age=cfg.DEEPSORT.MAX_AGE, n_init=cfg.DEEPSORT.N_INIT, nn_budget=cfg.DEEPSORT.NN_BUDGET,
+    )
 
     # Get names and colors
     names = model.module.names if hasattr(model, 'module') else model.names
@@ -189,179 +185,177 @@ def detect(opt, class_mapping):
     people_counting = 0
     save_dataset_idx = 0
 
-    model.warmup(imgsz=(1 if pt else nr_sources, 3, *imgsz))  # warmup
-    dt, seen = [0.0, 0.0, 0.0, 0.0], 0
-    for frame_idx, (path, im, im0s, vid_cap, s) in enumerate(dataset):
+    model.warmup(imgsz=(1, 3, *imgsz))  # warmup
+    processed_times, processed_images = [0.0, 0.0, 0.0, 0.0], 0
+    for frame_idx, (path, resize_image, raw_image, vid_cap, logger_string) in enumerate(dataset):
         '''
-        im.shape: (3, imgsz, imgsz) resized
-        im0s.shape: (1242, 1242, 3) original size
+        resize_image.shape: (3, imgsz, imgsz) resized
+        raw_image.shape: (h, w, 3) original size
         '''
         t1 = time_sync()
-        im = torch.from_numpy(im).to(device)
-        im = im.half() if half else im.float()  # uint8 to fp16/32
-        im /= 255.0  # 0 - 255 to 0.0 - 1.0
-        if len(im.shape) == 3:
-            im = im[None]  # expand for batch dim
+        resize_image = torch.from_numpy(resize_image).to(device)
+        resize_image = resize_image.half() if half else resize_image.float()  # uint8 to fp16/32
+        resize_image /= 255.0  # 0 - 255 to 0.0 - 1.0
+        if len(resize_image.shape) == 3:
+            resize_image = resize_image[None]  # expand for batch dim
         t2 = time_sync()
-        dt[0] += t2 - t1
+        processed_times[0] += t2 - t1
 
         # Inference
         visualize = increment_path(save_dir / Path(path[0]).stem, mkdir=True) if opt.visualize else False
-        pred = model(im, augment=opt.augment, visualize=visualize)
+        pred = model(resize_image, augment=opt.augment, visualize=visualize)
         t3 = time_sync()
-        dt[1] += t3 - t2
+        processed_times[1] += t3 - t2
 
         # Apply NMS
-        pred = non_max_suppression(pred, opt.conf_thres, opt.iou_thres, opt.classes, opt.agnostic_nms, max_det=opt.max_det)
-        dt[2] += time_sync() - t3
+        [pred] = non_max_suppression(pred, opt.conf_thres, opt.iou_thres, opt.classes, opt.agnostic_nms, max_det=opt.max_det)
+        processed_times[2] += time_sync() - t3
 
         # Process detections
-        for i, det in enumerate(pred):  # detections per image
-            seen += 1
-            if webcam:  # nr_sources >= 1
-                p, im0, _ = path[i], im0s[i].copy(), dataset.count
-                p = Path(p)  # to Path
-                s += f'{i}: '
-                txt_file_name = p.name
+        processed_images += 1
+        if webcam:  # nr_sources >= 1
+            p = path
+            p = Path(p)  # to Path
+            txt_file_name = p.name
+            save_path = str(save_dir / p.name)  # im.jpg, vid.mp4, ...
+        else:
+            p = path
+            p = Path(p)  # to Path
+            # video file
+            if source.endswith(VID_FORMATS):
+                txt_file_name = p.stem
                 save_path = str(save_dir / p.name)  # im.jpg, vid.mp4, ...
+            # folder with imgs
             else:
-                p, im0, _ = path, im0s.copy(), getattr(dataset, 'frame', 0)
-                p = Path(p)  # to Path
-                # video file
-                if source.endswith(VID_FORMATS):
-                    txt_file_name = p.stem
-                    save_path = str(save_dir / p.name)  # im.jpg, vid.mp4, ...
-                # folder with imgs
+                txt_file_name = p.parent.name  # get folder name containing current img
+                save_path = str(save_dir / p.parent.name)  # im.jpg, vid.mp4, ...
+
+        logger_string += '%gx%g ' % resize_image.shape[2:]  # print string
+        imc = raw_image.copy() if save_crop else raw_image  # for save_crop
+
+        annotator = Annotator(raw_image, line_width=2, pil=not ascii)
+
+        if pred is not None and len(pred):
+            # Rescale boxes from img_size to raw_image size
+            pred[:, :4] = scale_coords(resize_image.shape[2:], pred[:, :4], raw_image.shape).round()
+
+            # Print results
+            for c in pred[:, -1].unique():
+                n = (pred[:, -1] == c).sum()  # detections per class
+                logger_string += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
+
+            xywhs = xyxy2xywh(pred[:, 0:4])
+            confs = pred[:, 4]
+            clss = pred[:, 5]
+
+            # pass detections to deepsort
+            t4 = time_sync()
+            outputs = deepsort.update(xywhs.cpu(), confs.cpu(), clss.cpu(), raw_image)
+            t5 = time_sync()
+            processed_times[3] += t5 - t4
+
+            # draw boxes for visualization
+            for j, (output) in enumerate(outputs):
+                # output coordinates already resized back to the original size
+                bboxes, object_id, object_class, object_confidence = output[0:4], int(output[4]), int(output[5]), output[6]
+                obj_x_center_normalized = ((bboxes[0] + bboxes[2]) / 2) / raw_image.shape[1]
+                obj_y_center_normalized = ((bboxes[1] + bboxes[3]) / 2) / raw_image.shape[0]
+                obj_w_normalized = (bboxes[2] - bboxes[0]) / raw_image.shape[1]
+                obj_h_normalized = (bboxes[3] - bboxes[1]) / raw_image.shape[0]
+
+                # if not recently updated, reset the count
+                current_timestamp = datetime.now().timestamp()
+                if (object_id in object_cache.keys()) and \
+                        object_cache[object_id]["class_name"] == "person" and \
+                            (current_timestamp - object_cache[object_id]["last_update_time"]) < opt.cache_time_thres:
+                    person_segment = (
+                        object_cache[object_id]["last_coord"],
+                        ([obj_x_center_normalized, obj_y_center_normalized])
+                    )
+
+                    # Check if object segment intersects with boundary segment
+                    if intersects(person_segment, opt.segment_boundary):
+                        # across_boundary returns 0 (no crossing) or +1 (increase) or -1 (decrease)
+                        across_result = across_boundary(person_segment, opt.segment_boundary, opt.reverse)
+                        people_counting = people_counting + across_result
+
                 else:
-                    txt_file_name = p.parent.name  # get folder name containing current img
-                    save_path = str(save_dir / p.parent.name)  # im.jpg, vid.mp4, ...
+                    object_cache[object_id] = {}
+                    object_cache[object_id]["class_name"] = names[object_class]
 
-            txt_path = str(save_dir / 'tracks' / txt_file_name)  # im.txt
-            s += '%gx%g ' % im.shape[2:]  # print string
-            imc = im0.copy() if save_crop else im0  # for save_crop
+                object_cache[object_id]["last_update_time"] = current_timestamp
+                object_cache[object_id]["last_coord"] = (obj_x_center_normalized, obj_y_center_normalized)
 
-            annotator = Annotator(im0, line_width=2, pil=not ascii)
+                # For dataset collecting
+                if opt.save_as_dataset:
+                    # Save image
+                    cv2.imwrite(os.path.join(
+                        opt.save_dataset_path,
+                        "images", opt.save_dataset_type,
+                        f"{str(save_dataset_idx).zfill(10)}.png"), raw_image.copy())
 
-            if det is not None and len(det):
-                # Rescale boxes from img_size to im0 size
-                det[:, :4] = scale_coords(im.shape[2:], det[:, :4], im0.shape).round()
+                    # Save label
+                    _class = class_mapping[names[object_class]]
+                    with open(os.path.join(
+                        opt.save_dataset_path,
+                        "labels", opt.save_dataset_type,
+                        f"{str(save_dataset_idx).zfill(10)}.txt"), 'a') as f: 
+                        f.write(f"{_class} {obj_x_center_normalized} {obj_y_center_normalized} {obj_w_normalized} {obj_h_normalized}\n")
+                    
+                    save_dataset_idx+=1
 
-                # Print results
-                for c in det[:, -1].unique():
-                    n = (det[:, -1] == c).sum()  # detections per class
-                    s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
-
-                xywhs = xyxy2xywh(det[:, 0:4])
-                confs = det[:, 4]
-                clss = det[:, 5]
-
-                # pass detections to deepsort
-                t4 = time_sync()
-                outputs[i] = deepsort_list[i].update(xywhs.cpu(), confs.cpu(), clss.cpu(), im0)
-                t5 = time_sync()
-                dt[3] += t5 - t4
-
-                # draw boxes for visualization
-                if len(outputs[i]) > 0:
-                    for j, (output) in enumerate(outputs[i]):
-                        # output coordinates already resized back to the original size
-                        bboxes, object_id, object_class, object_confidence = output[0:4], int(output[4]), int(output[5]), output[6]
-                        obj_x_center_normalized = ((bboxes[0] + bboxes[2]) / 2) / im0.shape[1]
-                        obj_y_center_normalized = ((bboxes[1] + bboxes[3]) / 2) / im0.shape[0]
-                        obj_w_normalized = (bboxes[2] - bboxes[0]) / im0.shape[1]
-                        obj_h_normalized = (bboxes[3] - bboxes[1]) / im0.shape[0]
-
-                        # Increase object count; if not recently updated, reset the count
-                        current_timestamp = datetime.now().timestamp()
-                        if (object_id in object_cache.keys()) and \
-                                object_cache[object_id]["class_name"] == "person" and \
-                                    (current_timestamp - object_cache[object_id]["last_update_time"]) < opt.cache_time_thres:
-                            person_segment = (
-                                object_cache[object_id]["last_coord"],
-                                ([obj_x_center_normalized, obj_y_center_normalized])
-                            )
-                            if intersects(person_segment, opt.segment_boundary):
-                                # +1 or -1
-                                across_result = across_boundary(person_segment, opt.segment_boundary, opt.reverse)
-                                people_counting = people_counting + across_result
-
-                        else:
-                            object_cache[object_id] = {}
-                            object_cache[object_id]["class_name"] = names[object_class]
-
-                        object_cache[object_id]["last_update_time"] = current_timestamp
-                        object_cache[object_id]["last_coord"] = (obj_x_center_normalized, obj_y_center_normalized)
-
-                        # For dataset collecting
-                        if opt.save_as_dataset:
-                            # Save image
-                            cv2.imwrite(os.path.join(
-                                opt.save_dataset_path,
-                                "images", opt.save_dataset_type,
-                                f"{str(save_dataset_idx).zfill(10)}.png"), im0.copy())
-
-                            # Save label
-                            _class = class_mapping[names[object_class]]
-                            with open(os.path.join(
-                                opt.save_dataset_path,
-                                "labels", opt.save_dataset_type,
-                                f"{str(save_dataset_idx).zfill(10)}.txt"), 'a') as f: 
-                                f.write(f"{_class} {obj_x_center_normalized} {obj_y_center_normalized} {obj_w_normalized} {obj_h_normalized}\n")
-                            
-                            save_dataset_idx+=1
-
-                        label = f'{object_id} {names[object_class]} {object_confidence:.2f}'
-                        if not opt.hide_box:
-                            annotator.box_label(bboxes, label, color=colors(object_class, True))
-                
-                LOGGER.info(f'{s}Done. YOLO:({t3 - t2:.3f}s), DeepSort:({t5 - t4:.3f}s), People: {people_counting}')
-            else:
-                deepsort_list[i].increment_ages()
-                LOGGER.info('No detections')
+                label = f'{object_id} {names[object_class]} {object_confidence:.2f}'
+                if not opt.hide_box:
+                    annotator.box_label(bboxes, label, color=colors(object_class, True))
+            
+            LOGGER.info(f'{logger_string}Done. YOLO:({t3 - t2:.3f}s), DeepSort:({t5 - t4:.3f}s), People: {people_counting}')
+        else:
+            deepsort.increment_ages()
+            LOGGER.info('No detections')
 
 
-            # Stream results
-            im0 = annotator.result()
-            if show_vid:
-                cv2.imshow(str(p), im0)
-                cv2.waitKey(1)  # 1 millisecond
+        # Stream results
+        raw_image = annotator.result()
+        if show_vid:
+            cv2.imshow(str(p), raw_image)
+            cv2.waitKey(1)  # 1 millisecond
 
-            # Save results (image with detections)
-            if save_vid:
-                if vid_path[i] != save_path:  # new video
-                    vid_path[i] = save_path
-                    if isinstance(vid_writer[i], cv2.VideoWriter):
-                        vid_writer[i].release()  # release previous video writer
-                    if vid_cap:  # video
-                        fps = vid_cap.get(cv2.CAP_PROP_FPS)
-                        w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                        h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                    else:  # stream
-                        fps, w, h = 15, im0.shape[1], im0.shape[0]
-                    save_path = str(Path(save_path).with_suffix('.mp4'))  # force *.mp4 suffix on results videos
-                    vid_writer[i] = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-                
-                scaled_back_p1 = (int(opt.segment_boundary[0][0] * w), int(opt.segment_boundary[0][1] * h))
-                scaled_back_p2 = (int(opt.segment_boundary[1][0] * w), int(opt.segment_boundary[1][1] * h))
-                cv2.line(im0,scaled_back_p1, scaled_back_p2, (0, 0, 255), 1)
-                cv2.putText(im0,f'People: {people_counting}', 
-                    opt.bottomLeftCornerOfText, 
-                    cv2.FONT_HERSHEY_SIMPLEX, 
-                    opt.fontScale,
-                    opt.fontColor,
-                    opt.fontThickness,
-                    opt.fontLineType)
-                vid_writer[i].write(im0)
+        # Save results (image with detections)
+        if save_vid:
+            if vid_path != save_path:  # new video
+                vid_path = save_path
+                if isinstance(vid_writer, cv2.VideoWriter):
+                    vid_writer.release()  # release previous video writer
+                if vid_cap:  # video
+                    fps = vid_cap.get(cv2.CAP_PROP_FPS)
+                    w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                else:  # stream
+                    fps, w, h = 15, raw_image.shape[1], raw_image.shape[0]
+                save_path = str(Path(save_path).with_suffix('.mp4'))  # force *.mp4 suffix on results videos
+                vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+            
+            scaled_back_p1 = (int(opt.segment_boundary[0][0] * w), int(opt.segment_boundary[0][1] * h))
+            scaled_back_p2 = (int(opt.segment_boundary[1][0] * w), int(opt.segment_boundary[1][1] * h))
+            cv2.line(raw_image,scaled_back_p1, scaled_back_p2, (0, 0, 255), 1)
+            cv2.putText(raw_image,f'People: {people_counting}', 
+                opt.bottomLeftCornerOfText, 
+                cv2.FONT_HERSHEY_SIMPLEX, 
+                opt.fontScale,
+                opt.fontColor,
+                opt.fontThickness,
+                opt.fontLineType)
+            vid_writer.write(raw_image)
 
 
 
     # Print results
-    t = tuple(x / seen * 1E3 for x in dt)  # speeds per image
+    t = tuple(x / processed_images * 1E3 for x in processed_times)  # speeds per image
     LOGGER.info(f'Speed: %.1fms pre-process, %.1fms inference, %.1fms NMS, %.1fms deep sort update \
         per image at shape {(1, 3, *imgsz)}' % t)
     if save_txt or save_vid:
-        s = f"\n{len(list(save_dir.glob('tracks/*.txt')))} tracks saved to {save_dir / 'tracks'}" if save_txt else ''
-        LOGGER.info(f"Results saved to {colorstr('bold', save_dir)}{s}")
+        logger_string = f"\n{len(list(save_dir.glob('tracks/*.txt')))} tracks saved to {save_dir / 'tracks'}" if save_txt else ''
+        LOGGER.info(f"Results saved to {colorstr('bold', save_dir)}{logger_string}")
     if update:
         strip_optimizer(yolo_model)  # update model (to fix SourceChangeWarning)
 
@@ -407,7 +401,7 @@ if __name__ == '__main__':
     parser.add_argument('--hide-box', action='store_true', help='hide the cropping box')
     parser.add_argument('--reverse', action='store_true', help='True: inner to outer <=> increase')
     parser.add_argument('--cache-time-thres', type=int, default=30, help='Remove object in cache if not recently updated')
-    parser.add_argument('--segment-boundary', type=tuple, default=((0.75, 1), (0.8, 0)), help='normalized ((x1, y1), (x2, y2)')
+    parser.add_argument('--segment-boundary', type=tuple, default=((0.4, 0.2), (0.6, 0.5)), help='normalized ((x1, y1), (x2, y2)')
     opt = parser.parse_args()
 
     p1, p2 = opt.segment_boundary

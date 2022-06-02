@@ -227,7 +227,6 @@ class LoadImages:
         # Convert
         img = img.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
         img = np.ascontiguousarray(img)
-
         return path, img, img0, self.cap, s
 
     def new_video(self, path):
@@ -318,7 +317,7 @@ class LoadStreams:
             self.threads[i] = Thread(target=self.update, args=([i, cap, s]), daemon=True)
             LOGGER.info(f"{st} Success ({self.frames[i]} frames {w}x{h} at {self.fps[i]:.2f} FPS)")
             self.threads[i].start()
-        LOGGER.info('')  # newline
+        LOGGER.info('Initialize Done')  # newline
 
         # check for common shapes
         s = np.stack([letterbox(x, self.img_size, stride=self.stride, auto=self.auto)[0].shape for x in self.imgs])
@@ -364,7 +363,7 @@ class LoadStreams:
         img = img[..., ::-1].transpose((0, 3, 1, 2))  # BGR to RGB, BHWC to BCHW
         img = np.ascontiguousarray(img)
 
-        return self.sources, img, img0, None, ''
+        return self.sources[0], img, img0[0], None, ''
 
     def __len__(self):
         return len(self.sources)  # 1E12 frames = 32 streams at 30 FPS for 30 years
