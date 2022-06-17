@@ -11,7 +11,7 @@ client.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 HOST = '127.0.0.1'
 PORT = 8000
 server_addr = (HOST, PORT)
-video_path = "nocar.MOV"
+video_path = "onecar.MOV"
 image_dir = "./images"
 if not os.path.exists(image_dir):
     os.mkdir(image_dir)
