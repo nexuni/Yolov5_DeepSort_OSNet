@@ -82,70 +82,66 @@ def test_detect():
         except:
             pass  
 
-def main(opt, class_mapping):
-    # out, source, yolo_model, deep_sort_model, show_vid, save_vid, save_txt, imgsz, evaluate, half, \
-    #     project, exist_ok, update, save_crop = \
-    #     opt.output, opt.source, opt.yolo_model, opt.deep_sort_model, opt.show_vid, opt.save_vid, \
-    #     opt.save_txt, opt.imgsz, opt.evaluate, opt.half, opt.project, opt.exist_ok, opt.update, opt.save_crop
-    webcam = opt.source == '0' or\
-                opt.source.startswith('rtsp') or\
-                    opt.source.startswith('http') or\
-                        opt.source.endswith('.txt')
+def main(args, class_mapping):
+    webcam = args.source == '0' or\
+                args.source.startswith('rtsp') or\
+                    args.source.startswith('http') or\
+                        args.source.endswith('.txt')
 
     # Initialize
-    device = select_device(opt.device)
-    opt.half &= device.type != 'cpu'  # half precision only supported on CUDA
+    device = select_device(args.device)
+    args.half &= device.type != 'cpu'  # half precision only supported on CUDA
 
     # The MOT16 evaluation runs multiple inference streams in parallel, each one writing to
     # its own .txt file. Hence, in that case, the output folder is not restored
-    if not opt.evaluate:
-        if os.path.exists(opt.output):
+    if not args.evaluate:
+        if os.path.exists(args.output):
             pass
-            shutil.rmtree(opt.output)  # delete output folder
-        os.makedirs(opt.output)  # make new output folder
+            shutil.rmtree(args.output)  # delete output folder
+        os.makedirs(args.output)  # make new output folder
 
     # Directories
-    if type(opt.yolo_model) is str:  # single yolo model
-        exp_name = opt.yolo_model.split(".")[0]
-    elif type(opt.yolo_model) is list and len(opt.yolo_model) == 1:  # single models after --yolo_model
-        exp_name = opt.yolo_model[0].split(".")[0]
+    if type(args.yolo_model) is str:  # single yolo model
+        exp_name = args.yolo_model.split(".")[0]
+    elif type(args.yolo_model) is list and len(args.yolo_model) == 1:  # single models after --yolo_model
+        exp_name = args.yolo_model[0].split(".")[0]
     else:  # multiple models after --yolo_model
         exp_name = "ensemble"
-    exp_name = f"{exp_name}_{opt.deep_sort_model.split('/')[-1].split('.')[0]}"
-    save_dir = increment_path(Path(opt.project) / exp_name, exist_ok=opt.exist_ok)
+    exp_name = f"{exp_name}_{args.deep_sort_model.split('/')[-1].split('.')[0]}"
+    save_dir = increment_path(Path(args.project) / exp_name, exist_ok=args.exist_ok)
     save_dir.mkdir(parents=True, exist_ok=True)
 
     # Load model
     models = {
-        "coco128": DetectMultiBackend(opt.yolo_model, device=device, dnn=opt.dnn, fp16=True) if opt.half else DetectMultiBackend(opt.yolo_model, device=device, dnn=opt.dnn),
-        "cone": DetectMultiBackend(opt.cone_yolo_model, device=device, dnn=opt.dnn, fp16=True) if opt.half else DetectMultiBackend(opt.cone_yolo_model, device=device, dnn=opt.dnn)
+        "coco128": DetectMultiBackend(args.yolo_model, device=device, dnn=args.dnn, fp16=True) if args.half else DetectMultiBackend(args.yolo_model, device=device, dnn=args.dnn),
+        "cone": DetectMultiBackend(args.cone_yolo_model, device=device, dnn=args.dnn, fp16=True) if args.half else DetectMultiBackend(args.cone_yolo_model, device=device, dnn=args.dnn)
     }
     print(models['cone'].names, models['coco128'].names)
     stride, pt = models["coco128"].stride, models["coco128"].pt
-    imgsz = check_img_size(opt.imgsz, s=stride)  # check image size
+    imgsz = check_img_size(args.imgsz, s=stride)  # check image size
 
     # Half
-    opt.half &= pt and device.type != 'cpu'  # half precision only supported by PyTorch on CUDA
+    args.half &= pt and device.type != 'cpu'  # half precision only supported by PyTorch on CUDA
 
     for model in models.values():
         if pt:
-            model.model.half() if opt.half else model.model.float()
+            model.model.half() if args.half else model.model.float()
 
     # Initialize deepsort
     cfg = get_config()
-    cfg.merge_from_file(opt.config_deepsort)
+    cfg.merge_from_file(args.config_deepsort)
 
     # Create as many trackers as there are video sources
     deepsort = {
         "coco128": DeepSort(
-            opt.deep_sort_model,
+            args.deep_sort_model,
             device,
             max_dist=cfg.DEEPSORT.MAX_DIST,
             max_iou_distance=cfg.DEEPSORT.MAX_IOU_DISTANCE,
             max_age=cfg.DEEPSORT.MAX_AGE, n_init=cfg.DEEPSORT.N_INIT, nn_budget=cfg.DEEPSORT.NN_BUDGET,
         ),
         "cone": DeepSort(
-            opt.deep_sort_model,
+            args.deep_sort_model,
             device,
             max_dist=cfg.DEEPSORT.MAX_DIST,
             max_iou_distance=cfg.DEEPSORT.MAX_IOU_DISTANCE,
@@ -179,7 +175,7 @@ def main(opt, class_mapping):
             data = data_queue.get()
             data_path, data_type, data_timestamp = data["filepath"], data["type"], data["timestamp"]
 
-            if (datetime.now().timestamp() - data_timestamp) > opt.image_timestamp_thres:
+            if (datetime.now().timestamp() - data_timestamp) > args.image_timestamp_thres:
                 LOGGER.info("Image timeout -> Skip this frame")
                 os.remove(data_path)
                 continue
@@ -204,7 +200,7 @@ def main(opt, class_mapping):
         # Preprocessing image
         t1 = time_sync()
         im = torch.from_numpy(im).to(device)
-        im = im.half() if opt.half else im.float()  # uint8 to fp16/32
+        im = im.half() if args.half else im.float()  # uint8 to fp16/32
         im /= 255.0  # 0 - 255 to 0.0 - 1.0
         if len(im.shape) == 3:
             im = im[None]  # expand for batch dim
@@ -214,8 +210,8 @@ def main(opt, class_mapping):
         # Inference
         cone_pred = None
         if data_type == "patrol":
-            cone_pred = models["cone"](im, augment=opt.augment, visualize=False)
-        coco128_pred = models["coco128"](im, augment=opt.augment, visualize=False)
+            cone_pred = models["cone"](im, augment=args.augment, visualize=False)
+        coco128_pred = models["coco128"](im, augment=args.augment, visualize=False)
 
         t3 = time_sync()
         yolov5_time = t3 - t2
@@ -223,8 +219,8 @@ def main(opt, class_mapping):
 
         # Apply NMS
         if len(cone_pred) > 0:
-            [cone_pred] = non_max_suppression(cone_pred, opt.conf_thres, opt.iou_thres, [0], opt.agnostic_nms, max_det=opt.max_det)
-        [coco128_pred] = non_max_suppression(coco128_pred, opt.conf_thres, opt.iou_thres, opt.classes, opt.agnostic_nms, max_det=opt.max_det)
+            [cone_pred] = non_max_suppression(cone_pred, args.conf_thres, args.iou_thres, [0], args.agnostic_nms, max_det=args.max_det)
+        [coco128_pred] = non_max_suppression(coco128_pred, args.conf_thres, args.iou_thres, args.classes, args.agnostic_nms, max_det=args.max_det)
         processed_times[2] += time_sync() - t3
 
         # Processing detections
@@ -269,7 +265,7 @@ def main(opt, class_mapping):
 
                 # Increase object count; if not recently updated, reset the count
                 if (object_id in object_cache.keys()) and \
-                        (datetime.now().timestamp() - object_cache[object_id]["last_update_time"]) < opt.cache_time_thres:
+                        (datetime.now().timestamp() - object_cache[object_id]["last_update_time"]) < args.cache_time_thres:
                     object_cache[object_id]["count"] +=1
                 else:
                     object_cache[object_id] = {}
@@ -278,23 +274,23 @@ def main(opt, class_mapping):
 
                 object_cache[object_id]["last_update_time"] = datetime.now().timestamp()
 
-                if class_name in opt.landmark and\
-                    object_cache[object_id]["count"] > opt.landmark_frame_thres:
+                if class_name in args.landmark and\
+                    object_cache[object_id]["count"] > args.landmark_frame_thres:
                         LOGGER.info(f"{class_name} (id {object_id}) at x={bboxes[0]}, y={bboxes[1]}, w={bboxes[2]}, h={bboxes[3]}")
 
                 # For dataset collecting
-                if opt.save_as_dataset:
+                if args.save_as_dataset:
                     # Save image
                     cv2.imwrite(os.path.join(
-                        opt.save_dataset_path,
-                        "images", opt.save_dataset_type,
+                        args.save_dataset_path,
+                        "images", args.save_dataset_type,
                         f"{str(save_dataset_idx).zfill(10)}.png"), raw_image.copy())
 
                     # Save label
                     _class = class_mapping[class_name]
                     with open(os.path.join(
-                        opt.save_dataset_path,
-                        "labels", opt.save_dataset_type,
+                        args.save_dataset_path,
+                        "labels", args.save_dataset_type,
                         f"{str(save_dataset_idx).zfill(10)}.txt"), 'a') as f: 
                         f.write(f"{_class} {obj_x_center_normalized} {obj_y_center_normalized} {obj_w_normalized} {obj_h_normalized}\n")
                     
@@ -302,7 +298,7 @@ def main(opt, class_mapping):
 
                 # Add bbox to image
                 label = f'{object_id} {class_name} {object_confidence:.2f}'
-                if not opt.hide_box:
+                if not args.hide_box:
                     annotator.box_label(bboxes, label, color=colors(object_class, True))
 
             # Summary logger
@@ -344,7 +340,7 @@ def main(opt, class_mapping):
 
                 # Increase object count; if not recently updated, reset the count
                 if (object_id in object_cache.keys()) and \
-                        (datetime.now().timestamp() - object_cache[object_id]["last_update_time"]) < opt.cache_time_thres:
+                        (datetime.now().timestamp() - object_cache[object_id]["last_update_time"]) < args.cache_time_thres:
                     object_cache[object_id]["count"] +=1
                 else:
                     object_cache[object_id] = {}
@@ -356,37 +352,37 @@ def main(opt, class_mapping):
                 object_cache[object_id]["last_coord"] = np.array([obj_x_center_normalized, obj_y_center_normalized])
 
                 # For anomaly
-                if class_name in opt.anomalies and\
-                    object_cache[object_id]["count"] > opt.anomaly_save_thres:
+                if class_name in args.anomalies and\
+                    object_cache[object_id]["count"] > args.anomaly_save_thres:
                         save_crop = True
                         del object_cache[object_id]
 
-                if class_name in opt.landmark and\
-                    object_cache[object_id]["count"] > opt.landmark_frame_thres:
+                if class_name in args.landmark and\
+                    object_cache[object_id]["count"] > args.landmark_frame_thres:
                         LOGGER.info(f"{class_name} (id {object_id}) at x={bboxes[0]}, y={bboxes[1]}, w={bboxes[2]}, h={bboxes[3]}")
 
                 # For dataset collecting
-                if opt.save_as_dataset:
+                if args.save_as_dataset:
                     # Save image
                     cv2.imwrite(os.path.join(
-                        opt.save_dataset_path,
-                        "images", opt.save_dataset_type,
+                        args.save_dataset_path,
+                        "images", args.save_dataset_type,
                         f"{str(save_dataset_idx).zfill(10)}.png"), raw_image.copy())
 
                     # Save label
                     _class = class_mapping[class_name]
                     with open(os.path.join(
-                        opt.save_dataset_path,
-                        "labels", opt.save_dataset_type,
+                        args.save_dataset_path,
+                        "labels", args.save_dataset_type,
                         f"{str(save_dataset_idx).zfill(10)}.txt"), 'a') as f: 
                         f.write(f"{_class} {obj_x_center_normalized} {obj_y_center_normalized} {obj_w_normalized} {obj_h_normalized}\n")
                     
                     save_dataset_idx+=1
 
                 # Add bbox to image
-                if opt.save_vid or save_crop:
+                if args.save_vid or save_crop:
                     label = f'{object_id} {class_name} {object_confidence:.2f}'
-                    if not opt.hide_box:
+                    if not args.hide_box:
                         annotator.box_label(bboxes, label, color=colors(object_class, True))
                     if save_crop:
                         LOGGER.info(f"Save: {class_name}")
@@ -399,7 +395,7 @@ def main(opt, class_mapping):
                             )
                         add_anomaly({
                             ANOMALY_TYPE: class_name,
-                            ROBOT_ID: opt.robot_id,
+                            ROBOT_ID: args.robot_id,
                             SITE_ID: "site A",
                             ANOMALY_LAT: "24.987292967314355",
                             ANOMALY_LNG: "121.5522044067383",
@@ -408,24 +404,24 @@ def main(opt, class_mapping):
                         })
             
             # Determine cross road
-            if cross_road_frame_cnt > opt.cross_road_frame_thres:
+            if cross_road_frame_cnt > args.cross_road_frame_thres:
                 moving_vehicles = 0
                 # Iterate through all vehicles in object cache
                 for obj_id, obj_info in object_cache.items():
                     # Skip if not vehicles
-                    if object_cache[obj_id]["class_name"] in opt.vehicles:
+                    if object_cache[obj_id]["class_name"] in args.vehicles:
                         # Calculate displacement norm
                         displacement = object_cache[obj_id]["last_coord"] - object_cache[obj_id]["first_coord"]
                         displacement_norm = np.sqrt(np.sum(displacement**2))
                         # Consider it moving if > threshold
-                        if displacement_norm > opt.displacement_thres:
+                        if displacement_norm > args.displacement_thres:
                             LOGGER.info(f"Moving class: {object_cache[obj_id]['class_name']} | Moving id: {obj_id} | Norm: {displacement_norm}")
                             moving_vehicles+=1
                         # Reset the first coordinate
                         object_cache[obj_id]["first_coord"] = object_cache[obj_id]["last_coord"]
 
                 # Stop if moving vehicles > threshold
-                if moving_vehicles > opt.moving_vehicles_thres:
+                if moving_vehicles > args.moving_vehicles_thres:
                     LOGGER.info("STOP")
                     cv2.imwrite(f"temp_image/{moving_vehicles_idx}.png", raw_image)
                     moving_vehicles_idx+=1
@@ -443,9 +439,9 @@ def main(opt, class_mapping):
 
         # Stream results
         raw_image = annotator.result()
-        if opt.save_vid:
+        if args.save_vid:
             if not video_writer:
-                fps, size = opt.fps, (raw_image.shape[1], raw_image.shape[0])
+                fps, size = args.fps, (raw_image.shape[1], raw_image.shape[0])
                 save_path = str(Path(save_path).with_suffix('.mp4'))  # force *.mp4 suffix on results videos
                 video_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, size)
                 LOGGER.info(f"Video Path: {save_path}")
@@ -455,11 +451,10 @@ def main(opt, class_mapping):
     t = tuple(x / processed_images * 1E3 for x in processed_times)  # speeds per image
     LOGGER.info(f'Speed: %.1fms pre-process, %.1fms inference, %.1fms NMS, %.1fms deep sort update \
         per image at shape {(1, 3, *imgsz)}' % t)
-    if opt.save_txt or opt.save_vid:
-        s = f"\n{len(list(save_dir.glob('tracks/*.txt')))} tracks saved to {save_dir / 'tracks'}" if opt.save_txt else ''
-        LOGGER.info(f"Results saved to {colorstr('bold', save_dir)}{s}")
-    if opt.update:
-        strip_optimizer(opt.yolo_model)  # update model (to fix SourceChangeWarning)
+    if args.save_vid:
+        LOGGER.info(f"Results saved to {colorstr('bold', save_dir)}")
+    if args.update:
+        strip_optimizer(args.yolo_model)  # update model (to fix SourceChangeWarning)
 
 
 if __name__ == '__main__':
@@ -513,24 +508,24 @@ if __name__ == '__main__':
     parser.add_argument("--landmark", type=set, default=set(['cone', 'fire hydrant']))
     parser.add_argument('--landmark-frame-thres', type=int, default=10, help='Save the crop image if detected id exceed the threshold')
 
-    opt = parser.parse_args()
+    args = parser.parse_args()
 
-    print(f"classes: {opt.classes}")
+    print(f"classes: {args.classes}")
     class_mapping = None # This is for making training dataset
-    if opt.save_as_dataset:
-        if not os.path.exists(os.path.join(opt.save_dataset_path, "images", opt.save_dataset_type)):
-            os.makedirs(os.path.join(opt.save_dataset_path, "images", opt.save_dataset_type))
-        if not os.path.exists(os.path.join(opt.save_dataset_path, "labels", opt.save_dataset_type)):
-            os.makedirs(os.path.join(opt.save_dataset_path, "labels", opt.save_dataset_type))
+    if args.save_as_dataset:
+        if not os.path.exists(os.path.join(args.save_dataset_path, "images", args.save_dataset_type)):
+            os.makedirs(os.path.join(args.save_dataset_path, "images", args.save_dataset_type))
+        if not os.path.exists(os.path.join(args.save_dataset_path, "labels", args.save_dataset_type)):
+            os.makedirs(os.path.join(args.save_dataset_path, "labels", args.save_dataset_type))
         with open("./yolov5/nexuni/nexuni.yaml", 'r') as f:
             data_format = yaml.load(f, Loader=yaml.FullLoader)
             class_mapping = {name:i for i, name in enumerate(data_format["names"])}
 
-    opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
+    args.imgsz *= 2 if len(args.imgsz) == 1 else 1  # expand
     
     t = threading.Thread(target = Collect_data)
     t.daemon = True
     t.start()
     # test_detect()
     with torch.no_grad():
-        main(opt, class_mapping)
+        main(args, class_mapping)
