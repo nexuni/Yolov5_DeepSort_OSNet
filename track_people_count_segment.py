@@ -104,64 +104,59 @@ def normal_vec(segment):
     return np.array((p2[1] - p1[1], - (p2[0] - p1[0])))
 
 def detect(opt, class_mapping):
-    out, source, yolo_model, deep_sort_model, show_vid, save_vid, save_txt, imgsz, evaluate, half, \
-        project, exist_ok, update, save_crop = \
-        opt.output, opt.source, opt.yolo_model, opt.deep_sort_model, opt.show_vid, opt.save_vid, \
-        opt.save_txt, opt.imgsz, opt.evaluate, opt.half, opt.project, opt.exist_ok, opt.update, opt.save_crop
-    webcam = source == '0' or source.startswith(
-        'rtsp') or source.startswith('http') or source.endswith('.txt')
+    # out, source, yolo_model, deep_sort_model, show_vid, save_vid, save_txt, imgsz, evaluate, half, \
+    #     project, exist_ok, update, save_crop = \
+    #     opt.output, opt.source, opt.yolo_model, opt.deep_sort_model, opt.show_vid, opt.save_vid, \
+    #     opt.save_txt, opt.imgsz, opt.evaluate, opt.half, opt.project, opt.exist_ok, opt.update, opt.save_crop
+    
+    webcam = opt.source == '0' or opt.source.startswith(
+        'rtsp') or opt.source.startswith('http') or opt.source.endswith('.txt')
 
     # Initialize
     device = select_device(opt.device)
-    half &= device.type != 'cpu'  # half precision only supported on CUDA
+    opt.half &= device.type != 'cpu'  # half precision only supported on CUDA
 
     # The MOT16 evaluation runs multiple inference streams in parallel, each one writing to
     # its own .txt file. Hence, in that case, the output folder is not restored
-    if not evaluate:
-        if os.path.exists(out):
+    if not opt.evaluate:
+        if os.path.exists(opt.output):
             pass
-            shutil.rmtree(out)  # delete output folder
-        os.makedirs(out)  # make new output folder
+            shutil.rmtree(opt.output)  # delete output folder
+        os.makedirs(opt.output)  # make new output folder
 
     # Directories
-    if type(yolo_model) is str:  # single yolo model
-        exp_name = yolo_model.split(".")[0]
-    elif type(yolo_model) is list and len(yolo_model) == 1:  # single models after --yolo_model
-        exp_name = yolo_model[0].split(".")[0]
+    if type(opt.yolo_model) is str:  # single yolo model
+        exp_name = opt.yolo_model.split(".")[0]
+    elif type(opt.yolo_model) is list and len(opt.yolo_model) == 1:  # single models after --yolo_model
+        exp_name = opt.yolo_model[0].split(".")[0]
     else:  # multiple models after --yolo_model
         exp_name = "ensemble"
-    exp_name = exp_name + "_" + deep_sort_model.split('/')[-1].split('.')[0]
-    save_dir = increment_path(Path(project) / exp_name, exist_ok=exist_ok)  # increment run if project name exists
-    (save_dir / 'tracks' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
+    exp_name = exp_name + "_" + opt.deep_sort_model.split('/')[-1].split('.')[0]
+    save_dir = increment_path(Path(opt.project) / exp_name, exist_ok=opt.exist_ok)  # increment run if project name exists
+    save_dir.mkdir(parents=True, exist_ok=True)  # make dir
 
     # Load model
-    if half:
-        model = DetectMultiBackend(yolo_model, device=device, dnn=opt.dnn, fp16=True)
+    if opt.half:
+        model = DetectMultiBackend(opt.yolo_model, device=device, dnn=opt.dnn, fp16=True)
     else:
-        model = DetectMultiBackend(yolo_model, device=device, dnn=opt.dnn)
+        model = DetectMultiBackend(opt.yolo_model, device=device, dnn=opt.dnn)
     stride, names, pt = model.stride, model.names, model.pt
-    imgsz = check_img_size(imgsz, s=stride)  # check image size
+    imgsz = check_img_size(opt.imgsz, s=stride)  # check image size
 
     # Half
-    half &= pt and device.type != 'cpu'  # half precision only supported by PyTorch on CUDA
+    opt.half &= pt and device.type != 'cpu'  # half precision only supported by PyTorch on CUDA
     if pt:
-        model.model.half() if half else model.model.float()
+        model.model.half() if opt.half else model.model.float()
 
     # Set Dataloader
     vid_path, vid_writer = None, None
-    # Check if environment supports image displays
-    if show_vid:
-        show_vid = check_imshow()
 
     # Dataloader
     if webcam:
-        show_vid = check_imshow()
         cudnn.benchmark = True  # set True to speed up constant image size inference
-        dataset = LoadStreams(source, img_size=imgsz, stride=stride, auto=pt)
-        nr_sources = len(dataset)
+        dataset = LoadStreams(opt.source, img_size=imgsz, stride=stride, auto=pt)
     else:
-        dataset = LoadImages(source, img_size=imgsz, stride=stride, auto=pt)
-        nr_sources = 1
+        dataset = LoadImages(opt.source, img_size=imgsz, stride=stride, auto=pt)
 
 
     # initialize deepsort
@@ -170,7 +165,7 @@ def detect(opt, class_mapping):
 
     # Create as many trackers as there are video sources
     deepsort =  DeepSort(
-        deep_sort_model,
+        opt.deep_sort_model,
         device,
         max_dist=cfg.DEEPSORT.MAX_DIST,
         max_iou_distance=cfg.DEEPSORT.MAX_IOU_DISTANCE,
@@ -179,10 +174,11 @@ def detect(opt, class_mapping):
 
     # Get names and colors
     names = model.module.names if hasattr(model, 'module') else model.names
+    print(names)
 
     # Run tracking
     object_cache = {}
-    people_counting = 0
+    people_counting = 2
     save_dataset_idx = 0
 
     model.warmup(imgsz=(1, 3, *imgsz))  # warmup
@@ -194,7 +190,7 @@ def detect(opt, class_mapping):
         '''
         t1 = time_sync()
         resize_image = torch.from_numpy(resize_image).to(device)
-        resize_image = resize_image.half() if half else resize_image.float()  # uint8 to fp16/32
+        resize_image = resize_image.half() if opt.half else resize_image.float()  # uint8 to fp16/32
         resize_image /= 255.0  # 0 - 255 to 0.0 - 1.0
         if len(resize_image.shape) == 3:
             resize_image = resize_image[None]  # expand for batch dim
@@ -222,7 +218,7 @@ def detect(opt, class_mapping):
             p = path
             p = Path(p)  # to Path
             # video file
-            if source.endswith(VID_FORMATS):
+            if opt.source.endswith(VID_FORMATS):
                 txt_file_name = p.stem
                 save_path = str(save_dir / p.name)  # im.jpg, vid.mp4, ...
             # folder with imgs
@@ -231,7 +227,6 @@ def detect(opt, class_mapping):
                 save_path = str(save_dir / p.parent.name)  # im.jpg, vid.mp4, ...
 
         logger_string += '%gx%g ' % resize_image.shape[2:]  # print string
-        imc = raw_image.copy() if save_crop else raw_image  # for save_crop
 
         annotator = Annotator(raw_image, line_width=2, pil=not ascii)
 
@@ -268,15 +263,15 @@ def detect(opt, class_mapping):
                 if (object_id in object_cache.keys()) and \
                         object_cache[object_id]["class_name"] == "person" and \
                             (current_timestamp - object_cache[object_id]["last_update_time"]) < opt.cache_time_thres:
-                    person_segment = (
+
+                    object_segment = (
                         object_cache[object_id]["last_coord"],
                         ([obj_x_center_normalized, obj_y_center_normalized])
                     )
-
                     # Check if object segment intersects with boundary segment
-                    if intersects(person_segment, opt.segment_boundary):
+                    if intersects(object_segment, opt.segment_boundary):
                         # across_boundary returns 0 (no crossing) or +1 (increase) or -1 (decrease)
-                        across_result = across_boundary(person_segment, opt.segment_boundary, opt.reverse)
+                        across_result = across_boundary(object_segment, opt.segment_boundary, opt.reverse)
                         people_counting = people_counting + across_result
 
                 else:
@@ -316,12 +311,9 @@ def detect(opt, class_mapping):
 
         # Stream results
         raw_image = annotator.result()
-        if show_vid:
-            cv2.imshow(str(p), raw_image)
-            cv2.waitKey(1)  # 1 millisecond
 
         # Save results (image with detections)
-        if save_vid:
+        if opt.save_vid:
             if vid_path != save_path:  # new video
                 vid_path = save_path
                 if isinstance(vid_writer, cv2.VideoWriter):
@@ -346,28 +338,28 @@ def detect(opt, class_mapping):
                 opt.fontThickness,
                 opt.fontLineType)
             vid_writer.write(raw_image)
-
+            cv2.imwrite("temp_image/temp.png", raw_image)
+            # exit(-1)
 
 
     # Print results
     t = tuple(x / processed_images * 1E3 for x in processed_times)  # speeds per image
     LOGGER.info(f'Speed: %.1fms pre-process, %.1fms inference, %.1fms NMS, %.1fms deep sort update \
         per image at shape {(1, 3, *imgsz)}' % t)
-    if save_txt or save_vid:
-        logger_string = f"\n{len(list(save_dir.glob('tracks/*.txt')))} tracks saved to {save_dir / 'tracks'}" if save_txt else ''
-        LOGGER.info(f"Results saved to {colorstr('bold', save_dir)}{logger_string}")
-    if update:
-        strip_optimizer(yolo_model)  # update model (to fix SourceChangeWarning)
+    if opt.save_vid:
+        LOGGER.info(f"Results saved to {colorstr('bold', save_dir)}")
+    if opt.update:
+        strip_optimizer(opt.yolo_model)  # update model (to fix SourceChangeWarning)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--yolo_model', nargs='+', type=str, default='yolov5m.pt', help='model.pt path(s)')
-    parser.add_argument('--deep_sort_model', type=str, default='resnet50')
+    parser.add_argument('--deep_sort_model', type=str, default='osnet_ain_x1_0_MSMT17')
     parser.add_argument('--source', type=str, default='0', help='source')  # file/folder, 0 for webcam
     parser.add_argument('--output', type=str, default='inference/output', help='output folder')  # output folder
     parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, default=[640], help='inference size h,w')
-    parser.add_argument('--conf-thres', type=float, default=0.6, help='object confidence threshold')
+    parser.add_argument('--conf-thres', type=float, default=0.3, help='object confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.5, help='IOU threshold for NMS')
     parser.add_argument('--fourcc', type=str, default='mp4v', help='output video codec (verify ffmpeg support)')
     parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
@@ -400,10 +392,11 @@ if __name__ == '__main__':
     parser.add_argument("--save-dataset-type", type=str, default="train")
     parser.add_argument('--hide-box', action='store_true', help='hide the cropping box')
     parser.add_argument('--reverse', action='store_true', help='True: inner to outer <=> increase')
-    parser.add_argument('--cache-time-thres', type=int, default=30, help='Remove object in cache if not recently updated')
-    parser.add_argument('--segment-boundary', type=tuple, default=((0.4, 0.2), (0.6, 0.5)), help='normalized ((x1, y1), (x2, y2)')
+    parser.add_argument('--cache-time-thres', type=int, default=30, help='Remove object in cache if not recently updated (in UNIX time)')
+    parser.add_argument('--segment-boundary', type=tuple, default=((0.4, 0.3), (0.6, 0.57)), help='normalized ((x1, y1), (x2, y2)')
     opt = parser.parse_args()
 
+    # Forcing p1x <= p2x
     p1, p2 = opt.segment_boundary
     if p1[0] >= p2[0]:
         p1, p2 = p2, p1
