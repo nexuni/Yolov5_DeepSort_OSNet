@@ -82,73 +82,93 @@ def test_detect():
         except:
             pass  
 
-def detect(opt, class_mapping):
-    out, source, yolo_model, deep_sort_model, show_vid, save_vid, save_txt, imgsz, evaluate, half, \
-        project, exist_ok, update, save_crop = \
-        opt.output, opt.source, opt.yolo_model, opt.deep_sort_model, opt.show_vid, opt.save_vid, \
-        opt.save_txt, opt.imgsz, opt.evaluate, opt.half, opt.project, opt.exist_ok, opt.update, opt.save_crop
-    webcam = source == '0' or source.startswith(
-        'rtsp') or source.startswith('http') or source.endswith('.txt')
+def main(opt, class_mapping):
+    # out, source, yolo_model, deep_sort_model, show_vid, save_vid, save_txt, imgsz, evaluate, half, \
+    #     project, exist_ok, update, save_crop = \
+    #     opt.output, opt.source, opt.yolo_model, opt.deep_sort_model, opt.show_vid, opt.save_vid, \
+    #     opt.save_txt, opt.imgsz, opt.evaluate, opt.half, opt.project, opt.exist_ok, opt.update, opt.save_crop
+    webcam = opt.source == '0' or\
+                opt.source.startswith('rtsp') or\
+                    opt.source.startswith('http') or\
+                        opt.source.endswith('.txt')
 
     # Initialize
     device = select_device(opt.device)
-    half &= device.type != 'cpu'  # half precision only supported on CUDA
+    opt.half &= device.type != 'cpu'  # half precision only supported on CUDA
 
     # The MOT16 evaluation runs multiple inference streams in parallel, each one writing to
     # its own .txt file. Hence, in that case, the output folder is not restored
-    if not evaluate:
-        if os.path.exists(out):
+    if not opt.evaluate:
+        if os.path.exists(opt.output):
             pass
-            shutil.rmtree(out)  # delete output folder
-        os.makedirs(out)  # make new output folder
+            shutil.rmtree(opt.output)  # delete output folder
+        os.makedirs(opt.output)  # make new output folder
 
     # Directories
-    if type(yolo_model) is str:  # single yolo model
-        exp_name = yolo_model.split(".")[0]
-    elif type(yolo_model) is list and len(yolo_model) == 1:  # single models after --yolo_model
-        exp_name = yolo_model[0].split(".")[0]
+    if type(opt.yolo_model) is str:  # single yolo model
+        exp_name = opt.yolo_model.split(".")[0]
+    elif type(opt.yolo_model) is list and len(opt.yolo_model) == 1:  # single models after --yolo_model
+        exp_name = opt.yolo_model[0].split(".")[0]
     else:  # multiple models after --yolo_model
         exp_name = "ensemble"
-    exp_name = f"{exp_name}_{deep_sort_model.split('/')[-1].split('.')[0]}"
-    save_dir = increment_path(Path(project) / exp_name, exist_ok=exist_ok)
+    exp_name = f"{exp_name}_{opt.deep_sort_model.split('/')[-1].split('.')[0]}"
+    save_dir = increment_path(Path(opt.project) / exp_name, exist_ok=opt.exist_ok)
     save_dir.mkdir(parents=True, exist_ok=True)
 
     # Load model
-    model = DetectMultiBackend(yolo_model, device=device, dnn=opt.dnn, fp16=True) if half else DetectMultiBackend(yolo_model, device=device, dnn=opt.dnn)
-    stride, names, pt = model.stride, model.names, model.pt
-    imgsz = check_img_size(imgsz, s=stride)  # check image size
+    models = {
+        "coco128": DetectMultiBackend(opt.yolo_model, device=device, dnn=opt.dnn, fp16=True) if opt.half else DetectMultiBackend(opt.yolo_model, device=device, dnn=opt.dnn),
+        "cone": DetectMultiBackend(opt.cone_yolo_model, device=device, dnn=opt.dnn, fp16=True) if opt.half else DetectMultiBackend(opt.cone_yolo_model, device=device, dnn=opt.dnn)
+    }
+    print(models['cone'].names, models['coco128'].names)
+    stride, pt = models["coco128"].stride, models["coco128"].pt
+    imgsz = check_img_size(opt.imgsz, s=stride)  # check image size
 
     # Half
-    half &= pt and device.type != 'cpu'  # half precision only supported by PyTorch on CUDA
-    if pt:
-        model.model.half() if half else model.model.float()
+    opt.half &= pt and device.type != 'cpu'  # half precision only supported by PyTorch on CUDA
+
+    for model in models.values():
+        if pt:
+            model.model.half() if opt.half else model.model.float()
 
     # Initialize deepsort
     cfg = get_config()
     cfg.merge_from_file(opt.config_deepsort)
 
     # Create as many trackers as there are video sources
-    deepsort =  DeepSort(
-        deep_sort_model,
-        device,
-        max_dist=cfg.DEEPSORT.MAX_DIST,
-        max_iou_distance=cfg.DEEPSORT.MAX_IOU_DISTANCE,
-        max_age=cfg.DEEPSORT.MAX_AGE, n_init=cfg.DEEPSORT.N_INIT, nn_budget=cfg.DEEPSORT.NN_BUDGET,
-    )
+    deepsort = {
+        "coco128": DeepSort(
+            opt.deep_sort_model,
+            device,
+            max_dist=cfg.DEEPSORT.MAX_DIST,
+            max_iou_distance=cfg.DEEPSORT.MAX_IOU_DISTANCE,
+            max_age=cfg.DEEPSORT.MAX_AGE, n_init=cfg.DEEPSORT.N_INIT, nn_budget=cfg.DEEPSORT.NN_BUDGET,
+        ),
+        "cone": DeepSort(
+            opt.deep_sort_model,
+            device,
+            max_dist=cfg.DEEPSORT.MAX_DIST,
+            max_iou_distance=cfg.DEEPSORT.MAX_IOU_DISTANCE,
+            max_age=cfg.DEEPSORT.MAX_AGE, n_init=cfg.DEEPSORT.N_INIT, nn_budget=cfg.DEEPSORT.NN_BUDGET,
+        ),
+    }
 
     # Get names and colors
-    names = model.module.names if hasattr(model, 'module') else model.names
+    # names = model.module.names if hasattr(model, 'module') else model.names
 
     # Run tracking
     object_cache = {}
-    vehicles = set(['bicycle', 'car', 'motorcycle', 'bus', 'truck'])
     moving_vehicles_idx = 0
     cross_road_frame_cnt = 0
     save_dataset_idx = 0
     video_writer = None
 
-    model.warmup(imgsz=(1, 3, *imgsz))
+    for model in models.values():
+        model.warmup(imgsz=(1, 3, *imgsz))
+
     processed_times, processed_images = [0.0, 0.0, 0.0, 0.0], 0
+
+    LOGGER.info("READY!")
     while True:
         try:
             '''
@@ -160,15 +180,19 @@ def detect(opt, class_mapping):
             data_path, data_type, data_timestamp = data["filepath"], data["type"], data["timestamp"]
 
             if (datetime.now().timestamp() - data_timestamp) > opt.image_timestamp_thres:
+                LOGGER.info("Image timeout -> Skip this frame")
+                os.remove(data_path)
                 continue
-
             if data_type == "cross":
                 cross_road_frame_cnt +=1
             elif data_type == "anomaly":
                 cross_road_frame_cnt = 0
+            elif data_type == "patrol":
+                cross_road_frame_cnt = 0
             else:
                 break
             raw_image = cv2.imread(data_path)
+            os.remove(data_path)
             im = letterbox(raw_image, imgsz, stride=stride, auto=pt)[0]
             im = im.transpose((2, 0, 1))[::-1]
             im = np.ascontiguousarray(im)
@@ -180,7 +204,7 @@ def detect(opt, class_mapping):
         # Preprocessing image
         t1 = time_sync()
         im = torch.from_numpy(im).to(device)
-        im = im.half() if half else im.float()  # uint8 to fp16/32
+        im = im.half() if opt.half else im.float()  # uint8 to fp16/32
         im /= 255.0  # 0 - 255 to 0.0 - 1.0
         if len(im.shape) == 3:
             im = im[None]  # expand for batch dim
@@ -188,12 +212,19 @@ def detect(opt, class_mapping):
         processed_times[0] += t2 - t1
 
         # Inference
-        pred = model(im, augment=opt.augment, visualize=False)
+        cone_pred = None
+        if data_type == "patrol":
+            cone_pred = models["cone"](im, augment=opt.augment, visualize=False)
+        coco128_pred = models["coco128"](im, augment=opt.augment, visualize=False)
+
         t3 = time_sync()
-        processed_times[1] += t3 - t2
+        yolov5_time = t3 - t2
+        processed_times[1] += yolov5_time
 
         # Apply NMS
-        [pred] = non_max_suppression(pred, opt.conf_thres, opt.iou_thres, opt.classes, opt.agnostic_nms, max_det=opt.max_det)
+        if len(cone_pred) > 0:
+            [cone_pred] = non_max_suppression(cone_pred, opt.conf_thres, opt.iou_thres, [0], opt.agnostic_nms, max_det=opt.max_det)
+        [coco128_pred] = non_max_suppression(coco128_pred, opt.conf_thres, opt.iou_thres, opt.classes, opt.agnostic_nms, max_det=opt.max_det)
         processed_times[2] += time_sync() - t3
 
         # Processing detections
@@ -205,54 +236,51 @@ def detect(opt, class_mapping):
 
         annotator = Annotator(raw_image, line_width=2, pil=not ascii)
 
-        if pred is not None and len(pred):
+        deepsort_time = 0
+        if len(cone_pred) > 0:
             # Rescale boxes from img_size to raw_image size
-            pred[:, :4] = scale_coords(im.shape[2:], pred[:, :4], raw_image.shape).round()
+            cone_pred[:, :4] = scale_coords(im.shape[2:], cone_pred[:, :4], raw_image.shape).round()
 
             # Print results
-            for c in pred[:, -1].unique():
-                n = (pred[:, -1] == c).sum()  # detections per class
-                logger_string += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
+            for c in cone_pred[:, -1].unique():
+                n = (cone_pred[:, -1] == c).sum()  # detections per class
+                logger_string += f"{n} {models['cone'].names[int(c)]}{'s' * (n > 1)}, "  # add to string
 
-            xywhs = xyxy2xywh(pred[:, 0:4])
-            confs = pred[:, 4]
-            clss = pred[:, 5]
+            xywhs = xyxy2xywh(cone_pred[:, 0:4])
+            confs = cone_pred[:, 4]
+            clss = cone_pred[:, 5]
 
             # Pass detections to deepsort
             t4 = time_sync()
-            outputs = deepsort.update(xywhs.cpu(), confs.cpu(), clss.cpu(), raw_image)
+            outputs = deepsort["cone"].update(xywhs.cpu(), confs.cpu(), clss.cpu(), raw_image)
             t5 = time_sync()
-            processed_times[3] += t5 - t4
+            deepsort_time += t5 - t4
 
             # Draw boxes for visualization
             for j, (output) in enumerate(outputs):
                 save_crop = False
                 # output coordinates already resized back to the original size
                 bboxes, object_id, object_class, object_confidence = output[0:4], int(output[4]), int(output[5]), output[6]
+                class_name = models["cone"].names[object_class]
                 obj_x_center_normalized = ((bboxes[0] + bboxes[2]) / 2) / raw_image.shape[1]
                 obj_y_center_normalized = ((bboxes[1] + bboxes[3]) / 2) / raw_image.shape[0]
                 obj_w_normalized = (bboxes[2] - bboxes[0]) / raw_image.shape[1]
                 obj_h_normalized = (bboxes[3] - bboxes[1]) / raw_image.shape[0]
 
                 # Increase object count; if not recently updated, reset the count
-                current_timestamp = datetime.now().timestamp()
                 if (object_id in object_cache.keys()) and \
-                        (current_timestamp - object_cache[object_id]["last_update_time"]) < opt.cache_time_thres:
+                        (datetime.now().timestamp() - object_cache[object_id]["last_update_time"]) < opt.cache_time_thres:
                     object_cache[object_id]["count"] +=1
                 else:
                     object_cache[object_id] = {}
                     object_cache[object_id]["count"] = 1
-                    object_cache[object_id]["first_coord"] = np.array([obj_x_center_normalized, obj_y_center_normalized])
-                    object_cache[object_id]["class_name"] = names[object_class]
+                    object_cache[object_id]["class_name"] = class_name
 
-                object_cache[object_id]["last_update_time"] = current_timestamp
-                object_cache[object_id]["last_coord"] = np.array([obj_x_center_normalized, obj_y_center_normalized])
+                object_cache[object_id]["last_update_time"] = datetime.now().timestamp()
 
-                # For anomaly
-                if not (object_cache[object_id]["class_name"] in vehicles):
-                    if object_cache[object_id]["count"] > opt.save_thres:
-                        save_crop = True
-                        del object_cache[object_id]
+                if class_name in opt.landmark and\
+                    object_cache[object_id]["count"] > opt.landmark_frame_thres:
+                        LOGGER.info(f"{class_name} (id {object_id}) at x={bboxes[0]}, y={bboxes[1]}, w={bboxes[2]}, h={bboxes[3]}")
 
                 # For dataset collecting
                 if opt.save_as_dataset:
@@ -263,7 +291,7 @@ def detect(opt, class_mapping):
                         f"{str(save_dataset_idx).zfill(10)}.png"), raw_image.copy())
 
                     # Save label
-                    _class = class_mapping[names[object_class]]
+                    _class = class_mapping[class_name]
                     with open(os.path.join(
                         opt.save_dataset_path,
                         "labels", opt.save_dataset_type,
@@ -273,21 +301,104 @@ def detect(opt, class_mapping):
                     save_dataset_idx+=1
 
                 # Add bbox to image
-                if save_vid or save_crop:
-                    label = f'{object_id} {names[object_class]} {object_confidence:.2f}'
+                label = f'{object_id} {class_name} {object_confidence:.2f}'
+                if not opt.hide_box:
+                    annotator.box_label(bboxes, label, color=colors(object_class, True))
+
+            # Summary logger
+            # LOGGER.info(f'{logger_string}Done. YOLO:({t3 - t2:.3f}s), DeepSort:({t5 - t4:.3f}s)')
+        else:
+            deepsort["cone"].increment_ages()
+            # LOGGER.info('No detections')
+
+        if len(coco128_pred) > 0:
+            # Rescale boxes from img_size to raw_image size
+            coco128_pred[:, :4] = scale_coords(im.shape[2:], coco128_pred[:, :4], raw_image.shape).round()
+
+            # Print results
+            for c in coco128_pred[:, -1].unique():
+                n = (coco128_pred[:, -1] == c).sum()  # detections per class
+                logger_string += f"{n} {models['coco128'].names[int(c)]}{'s' * (n > 1)}, "  # add to string
+
+            xywhs = xyxy2xywh(coco128_pred[:, 0:4])
+            confs = coco128_pred[:, 4]
+            clss = coco128_pred[:, 5]
+
+            # Pass detections to deepsort
+            t4 = time_sync()
+            outputs = deepsort["coco128"].update(xywhs.cpu(), confs.cpu(), clss.cpu(), raw_image)
+            t5 = time_sync()
+            deepsort_time += t5 - t4
+            processed_times[3] += deepsort_time
+
+            # Draw boxes for visualization
+            for j, (output) in enumerate(outputs):
+                save_crop = False
+                # output coordinates already resized back to the original size
+                bboxes, object_id, object_class, object_confidence = output[0:4], int(output[4]), int(output[5]), output[6]
+                class_name = models["coco128"].names[object_class]
+                obj_x_center_normalized = ((bboxes[0] + bboxes[2]) / 2) / raw_image.shape[1]
+                obj_y_center_normalized = ((bboxes[1] + bboxes[3]) / 2) / raw_image.shape[0]
+                obj_w_normalized = (bboxes[2] - bboxes[0]) / raw_image.shape[1]
+                obj_h_normalized = (bboxes[3] - bboxes[1]) / raw_image.shape[0]
+
+                # Increase object count; if not recently updated, reset the count
+                if (object_id in object_cache.keys()) and \
+                        (datetime.now().timestamp() - object_cache[object_id]["last_update_time"]) < opt.cache_time_thres:
+                    object_cache[object_id]["count"] +=1
+                else:
+                    object_cache[object_id] = {}
+                    object_cache[object_id]["count"] = 1
+                    object_cache[object_id]["first_coord"] = np.array([obj_x_center_normalized, obj_y_center_normalized])
+                    object_cache[object_id]["class_name"] = class_name
+
+                object_cache[object_id]["last_update_time"] = datetime.now().timestamp()
+                object_cache[object_id]["last_coord"] = np.array([obj_x_center_normalized, obj_y_center_normalized])
+
+                # For anomaly
+                if class_name in opt.anomalies and\
+                    object_cache[object_id]["count"] > opt.anomaly_save_thres:
+                        save_crop = True
+                        del object_cache[object_id]
+
+                if class_name in opt.landmark and\
+                    object_cache[object_id]["count"] > opt.landmark_frame_thres:
+                        LOGGER.info(f"{class_name} (id {object_id}) at x={bboxes[0]}, y={bboxes[1]}, w={bboxes[2]}, h={bboxes[3]}")
+
+                # For dataset collecting
+                if opt.save_as_dataset:
+                    # Save image
+                    cv2.imwrite(os.path.join(
+                        opt.save_dataset_path,
+                        "images", opt.save_dataset_type,
+                        f"{str(save_dataset_idx).zfill(10)}.png"), raw_image.copy())
+
+                    # Save label
+                    _class = class_mapping[class_name]
+                    with open(os.path.join(
+                        opt.save_dataset_path,
+                        "labels", opt.save_dataset_type,
+                        f"{str(save_dataset_idx).zfill(10)}.txt"), 'a') as f: 
+                        f.write(f"{_class} {obj_x_center_normalized} {obj_y_center_normalized} {obj_w_normalized} {obj_h_normalized}\n")
+                    
+                    save_dataset_idx+=1
+
+                # Add bbox to image
+                if opt.save_vid or save_crop:
+                    label = f'{object_id} {class_name} {object_confidence:.2f}'
                     if not opt.hide_box:
                         annotator.box_label(bboxes, label, color=colors(object_class, True))
                     if save_crop:
-                        LOGGER.info(f"Save: {names[object_class]}")
+                        LOGGER.info(f"Save: {class_name}")
                         _, full_path = save_one_box(
                             bboxes,
                             raw_image.copy(),
                             file=Path(os.path.join(
-                                save_dir,'crops', names[object_class], f'id_{object_id}', f'{p.stem}.jpg')),
+                                save_dir,'crops', class_name, f'id_{object_id}', f'{p.stem}.jpg')),
                             BGR=True
                             )
                         add_anomaly({
-                            ANOMALY_TYPE: names[object_class],
+                            ANOMALY_TYPE: class_name,
                             ROBOT_ID: opt.robot_id,
                             SITE_ID: "site A",
                             ANOMALY_LAT: "24.987292967314355",
@@ -302,16 +413,16 @@ def detect(opt, class_mapping):
                 # Iterate through all vehicles in object cache
                 for obj_id, obj_info in object_cache.items():
                     # Skip if not vehicles
-                    if not (object_cache[obj_id]["class_name"] in vehicles): continue
-                    # Calculate displacement norm
-                    displacement = object_cache[obj_id]["last_coord"] - object_cache[obj_id]["first_coord"]
-                    displacement_norm = np.sqrt(np.sum(displacement**2))
-                    # Consider it moving if > threshold
-                    if displacement_norm > opt.displacement_thres:
-                        LOGGER.info(f"Moving class: {object_cache[obj_id]['class_name']} | Moving id: {obj_id} | Norm: {displacement_norm}")
-                        moving_vehicles+=1
-                    # Reset the first coordinate
-                    object_cache[obj_id]["first_coord"] = object_cache[obj_id]["last_coord"]
+                    if object_cache[obj_id]["class_name"] in opt.vehicles:
+                        # Calculate displacement norm
+                        displacement = object_cache[obj_id]["last_coord"] - object_cache[obj_id]["first_coord"]
+                        displacement_norm = np.sqrt(np.sum(displacement**2))
+                        # Consider it moving if > threshold
+                        if displacement_norm > opt.displacement_thres:
+                            LOGGER.info(f"Moving class: {object_cache[obj_id]['class_name']} | Moving id: {obj_id} | Norm: {displacement_norm}")
+                            moving_vehicles+=1
+                        # Reset the first coordinate
+                        object_cache[obj_id]["first_coord"] = object_cache[obj_id]["last_coord"]
 
                 # Stop if moving vehicles > threshold
                 if moving_vehicles > opt.moving_vehicles_thres:
@@ -323,36 +434,38 @@ def detect(opt, class_mapping):
                 cross_road_frame_cnt = 0
             
             # Summary logger
-            LOGGER.info(f'{logger_string}Done. YOLO:({t3 - t2:.3f}s), DeepSort:({t5 - t4:.3f}s)')
+            # LOGGER.info(f'{logger_string}Done. YOLO:({t3 - t2:.3f}s), DeepSort:({t5 - t4:.3f}s)')
         else:
-            deepsort.increment_ages()
-            LOGGER.info('No detections')
+            deepsort["coco128"].increment_ages()
+            # LOGGER.info('No detections')
+
+        LOGGER.info(f'{logger_string}Done. YOLO:({yolov5_time:.3f}s), DeepSort:({deepsort_time:.3f}s)')
 
         # Stream results
         raw_image = annotator.result()
-        if save_vid:
+        if opt.save_vid:
             if not video_writer:
                 fps, size = opt.fps, (raw_image.shape[1], raw_image.shape[0])
-                video_writer = cv2.VideoWriter("result.mp4", cv2.VideoWriter_fourcc(*'mp4v'), fps, size)
+                save_path = str(Path(save_path).with_suffix('.mp4'))  # force *.mp4 suffix on results videos
+                video_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, size)
+                LOGGER.info(f"Video Path: {save_path}")
             video_writer.write(raw_image)
         
-        # Remove image after inferenced
-        os.remove(data_path)
-
     # Print results
     t = tuple(x / processed_images * 1E3 for x in processed_times)  # speeds per image
     LOGGER.info(f'Speed: %.1fms pre-process, %.1fms inference, %.1fms NMS, %.1fms deep sort update \
         per image at shape {(1, 3, *imgsz)}' % t)
-    if save_txt or save_vid:
-        s = f"\n{len(list(save_dir.glob('tracks/*.txt')))} tracks saved to {save_dir / 'tracks'}" if save_txt else ''
+    if opt.save_txt or opt.save_vid:
+        s = f"\n{len(list(save_dir.glob('tracks/*.txt')))} tracks saved to {save_dir / 'tracks'}" if opt.save_txt else ''
         LOGGER.info(f"Results saved to {colorstr('bold', save_dir)}{s}")
-    if update:
-        strip_optimizer(yolo_model)  # update model (to fix SourceChangeWarning)
+    if opt.update:
+        strip_optimizer(opt.yolo_model)  # update model (to fix SourceChangeWarning)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--yolo_model', nargs='+', type=str, default='yolov5m.pt', help='model.pt path(s)')
+    parser.add_argument('--yolo_model', nargs='+', type=str, default='yolov5x.pt', help='model.pt path(s)')
+    parser.add_argument('--cone_yolo_model', type=str, default='yolov5_cone.pt', help='model.pt path(s)')
     parser.add_argument('--deep_sort_model', type=str, default='resnet50')
     parser.add_argument('--source', type=str, default='0', help='source')  # file/folder, 0 for webcam
     parser.add_argument('--output', type=str, default='inference/output', help='output folder')  # output folder
@@ -380,21 +493,29 @@ if __name__ == '__main__':
     parser.add_argument('--name', default='exp', help='save results to project/name')
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
     # Custom
-    parser.add_argument('--fps', type=float, default=15., help='fps for saving vedio')
+    parser.add_argument('--fps', type=float, default=30., help='fps for saving vedio')
     parser.add_argument('--hide-box', action='store_true', help='hide the cropping box')
     parser.add_argument('--save-as-dataset', action='store_true', help='save the prediction results to coco dataset format')
     parser.add_argument("--save-dataset-path", type=str, default="./yolov5/nexuni/dataset")
     parser.add_argument("--save-dataset-type", type=str, default="train")
     parser.add_argument("--robot-id", type=str, default="robot id")
-    parser.add_argument('--save-thres', type=int, default=100, help='Save the crop image if detected id exceed the threshold')
-    parser.add_argument('--cache-time-thres', type=int, default=300, help='Remove object in cache if not recently updated')
-    parser.add_argument('--image-timestamp-thres', type=int, default=30, help='Skip the image if out of date')
+    parser.add_argument('--cache-time-thres', type=int, default=5, help='Remove object in cache if not recently updated')
+    parser.add_argument('--image-timestamp-thres', type=int, default=1000, help='Skip the image if out of date')
+    # Anomaly
+    parser.add_argument("--anomalies", type=set, default=set(['person', 'bicycle', 'car', 'motorcycle', 'bus', 'truck', 'backpack', 'handbag', 'suitcase']))
+    parser.add_argument('--anomaly-save-thres', type=int, default=100, help='Save the crop image if detected id count > threshold')
+    # Cross road
+    parser.add_argument("--vehicles", type=set, default=set(['bicycle', 'car', 'motorcycle', 'bus', 'truck']))
     parser.add_argument('--cross-road-frame-thres', type=int, default=100, help='Determine cross or deny after detecting cross-road-frame-thres images')
     parser.add_argument('--displacement-thres', type=float, default=0.33, help='Consider vehicles moving if displacement > displacement-thres')
     parser.add_argument('--moving-vehicles-thres', type=int, default=0, help='Determine cross or deny if moving vehicles > moving-vehicles-thres')
+    # Patrol
+    parser.add_argument("--landmark", type=set, default=set(['cone', 'fire hydrant']))
+    parser.add_argument('--landmark-frame-thres', type=int, default=10, help='Save the crop image if detected id exceed the threshold')
+
     opt = parser.parse_args()
 
-
+    print(f"classes: {opt.classes}")
     class_mapping = None # This is for making training dataset
     if opt.save_as_dataset:
         if not os.path.exists(os.path.join(opt.save_dataset_path, "images", opt.save_dataset_type)):
@@ -406,10 +527,10 @@ if __name__ == '__main__':
             class_mapping = {name:i for i, name in enumerate(data_format["names"])}
 
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
-
+    
     t = threading.Thread(target = Collect_data)
     t.daemon = True
     t.start()
     # test_detect()
     with torch.no_grad():
-        detect(opt, class_mapping)
+        main(opt, class_mapping)
