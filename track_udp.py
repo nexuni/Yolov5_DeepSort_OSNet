@@ -50,12 +50,29 @@ import socket
 import threading
 import time
 import queue
+import subprocess
 
 data_queue = queue.Queue()
 
+def subprocess_helper_function(args,shell=False,timeout=5):
+    '''
+    List input []
+    '''
+    try:
+        subprocess.check_call(args,timeout=timeout,shell=shell)
+    except Exception as e:
+        self.get_logger().warn("%s" % str(e))
+        return False
+    return True
+
+    # from_file = "/lpr_data/yolo_picture/nsr_220616181929656_GBH1512S_9974.jpg"
+    # ip = "root@10.0.201.158:"
+    # to_file = "/lpr_data/yolo_picture/nsr_220616181929656_GBH1512S_9974.jpg"
+    # result = subprocess_helper_function(["scp",from_file,ip+to_file])
+
 def Collect_data():
     HOST = '127.0.0.1'
-    PORT = 8000
+    PORT = 5675
     server_addr = (HOST, PORT)
     server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -78,7 +95,7 @@ def test_detect():
         try:
             data = data_queue.get()
             print(f"processing data: {data}")
-            writer.write(cv2.imread(data["filepath"]))
+            writer.write(cv2.imread(data["image_path"]))
         except:
             pass  
 
@@ -157,9 +174,10 @@ def detect(opt, class_mapping):
             raw_image.shape: (h, w, 3) original size
             '''
             data = data_queue.get()
-            data_path, data_type, data_timestamp = data["filepath"], data["type"], data["timestamp"]
+            data_path, data_type, data_timestamp = data["image_path"], data["type"], data["timestamp"]
 
             if (datetime.now().timestamp() - data_timestamp) > opt.image_timestamp_thres:
+                LOGGER_INFO("Skip due to time out")
                 continue
 
             if data_type == "cross":
@@ -286,13 +304,21 @@ def detect(opt, class_mapping):
                                 save_dir,'crops', names[object_class], f'id_{object_id}', f'{p.stem}.jpg')),
                             BGR=True
                             )
+
+                        from_file = full_path
+                        ip = "root@10.0.201.158:"
+                        file_name = names[object_class]+"_"+str(object_id)+"_"+str(p.stem)+".jpg"
+                        to_file = os.path.join("/lpr_data/yolo_result", file_name)
+                        # to_file = "/lpr_data/yolo_picture/nsr_220616181929656_GBH1512S_9974.jpg"
+                        result = subprocess_helper_function(["scp",from_file,ip+to_file])
+
                         add_anomaly({
                             ANOMALY_TYPE: names[object_class],
                             ROBOT_ID: opt.robot_id,
-                            SITE_ID: "site A",
-                            ANOMALY_LAT: "24.987292967314355",
-                            ANOMALY_LNG: "121.5522044067383",
-                            ANOMALY_IMAGE_PATH: 'asset' + full_path,
+                            SITE_ID: data["site_id"],
+                            ANOMALY_LAT: data["latitude"],
+                            ANOMALY_LNG: data["longitude"],
+                            ANOMALY_IMAGE_PATH: 'asset' + to_file,
                             TIME: datetime.now().timestamp()
                         })
             
@@ -386,7 +412,7 @@ if __name__ == '__main__':
     parser.add_argument("--save-dataset-path", type=str, default="./yolov5/nexuni/dataset")
     parser.add_argument("--save-dataset-type", type=str, default="train")
     parser.add_argument("--robot-id", type=str, default="robot id")
-    parser.add_argument('--save-thres', type=int, default=100, help='Save the crop image if detected id exceed the threshold')
+    parser.add_argument('--save-thres', type=int, default=2, help='Save the crop image if detected id exceed the threshold')
     parser.add_argument('--cache-time-thres', type=int, default=300, help='Remove object in cache if not recently updated')
     parser.add_argument('--image-timestamp-thres', type=int, default=30, help='Skip the image if out of date')
     parser.add_argument('--cross-road-frame-thres', type=int, default=100, help='Determine cross or deny after detecting cross-road-frame-thres images')
@@ -412,4 +438,4 @@ if __name__ == '__main__':
     t.start()
     # test_detect()
     with torch.no_grad():
-        detect(opt, class_mapping)
+       detect(opt, class_mapping)

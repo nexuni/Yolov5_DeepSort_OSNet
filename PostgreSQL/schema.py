@@ -43,4 +43,4 @@ ROBOT_BATTERY_USAGE = "robot_battery_usage"
 ROBOT_STREAM_URL = "robot_stream_url"
 
 # PostgreSQL
-DB = "http://192.168.8.211:5062"
+DB = "http://10.0.201.158:5061"
